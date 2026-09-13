@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0a0b0d" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Life OS" />
+  <title>Life OS — Today</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0b0d;
+      --bg-soft: #12141a;
+      --card: #15181e;
+      --card-2: #1a1e25;
+      --line: rgba(255,255,255,0.07);
+      --text: #f2f4f7;
+      --muted: #8d95a3;
+      --muted-2: #5c6472;
+      --gold: #d4af6a;
+      --success: #6bc9a0;
+      --danger: #d98b73;
+      --skin: #e3a98f;
+      --hair: #cf9a4c;
+      --fitness: #5fb8a6;
+      --learning: #8aa8e6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      background: radial-gradient(circle at 10% -10%, #171a20 0%, var(--bg) 55%);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .wrap { max-width: 620px; margin: 0 auto; padding: 28px 20px 60px; }
+    .brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+    .brand h1 { font-size: 19px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .brand-badge { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 2px; margin-bottom: 20px; }
+
+    .tabs {
+      display: inline-flex; background: var(--card); border: 1px solid var(--line);
+      border-radius: 12px; padding: 3px; margin-bottom: 22px;
+    }
+    .tabs button {
+      background: transparent; border: none; color: var(--muted); font-size: 13px;
+      font-weight: 600; padding: 7px 16px; border-radius: 9px; cursor: pointer;
+      font-family: inherit; transition: all .15s ease;
+    }
+    .tabs button.active { background: var(--card-2); color: var(--text); box-shadow: 0 1px 0 var(--line) inset; }
+
+    .hero {
+      display: flex; align-items: center; gap: 18px;
+      background: linear-gradient(160deg, #1a1d24 0%, #14171c 100%);
+      border: 1px solid var(--line); border-radius: 20px; padding: 18px 20px;
+      margin-bottom: 24px; box-shadow: 0 12px 30px -18px rgba(0,0,0,0.7);
+    }
+    .ring { position: relative; width: 68px; height: 68px; border-radius: 50%; flex-shrink: 0; }
+    .ring-fill { position: absolute; inset: 0; border-radius: 50%; }
+    .ring-inner {
+      position: absolute; inset: 6px; border-radius: 50%; background: #14171c;
+      display: flex; align-items: center; justify-content: center; flex-direction: column;
+    }
+    .ring-pct { font-size: 15px; font-weight: 700; }
+    .ring-label { font-size: 8px; color: var(--muted-2); letter-spacing: .05em; text-transform: uppercase; }
+    .hero-body { flex: 1; min-width: 0; }
+    .hero-kicker { font-size: 11px; color: var(--gold); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; margin-bottom: 4px; }
+    .hero-title { font-size: 17px; font-weight: 700; margin-bottom: 3px; }
+    .hero-meta { font-size: 12.5px; color: var(--muted); }
+    .stats { display: flex; gap: 8px; margin-top: 4px; }
+    .stat-chip { font-size: 11px; color: var(--muted); background: rgba(255,255,255,0.04); border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px; }
+
+    .section-label {
+      font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .09em;
+      font-weight: 700; margin: 26px 0 12px;
+    }
+
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+      padding: 15px 16px; margin-bottom: 10px; position: relative; overflow: hidden;
+      transition: border-color .15s ease;
+    }
+    .card::before {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: var(--accent, var(--muted-2));
+    }
+    .card.done { opacity: 0.5; }
+    .card.skipped { opacity: 0.4; }
+    .card-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+    .badge {
+      display: inline-flex; align-items: center; font-size: 10px; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase; color: var(--accent, var(--muted));
+      background: color-mix(in srgb, var(--accent, var(--muted)) 16%, transparent);
+      border-radius: 6px; padding: 2px 6px; margin-bottom: 6px;
+    }
+    .card-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+    .card-time { font-size: 12px; color: var(--muted); }
+    .status-tag { font-size: 11px; color: var(--muted-2); text-transform: capitalize; white-space: nowrap; }
+    .status-tag.done { color: var(--success); }
+    .status-tag.skipped { color: var(--danger); }
+
+    .steps { margin: 12px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+    .steps li {
+      display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 13px;
+      cursor: pointer; line-height: 1.4;
+    }
+    .dot {
+      width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid var(--muted-2);
+      flex-shrink: 0; margin-top: 1px; display: flex; align-items: center; justify-content: center;
+      font-size: 9px; color: transparent; transition: all .15s ease;
+    }
+    .steps li.done .dot { background: var(--success); border-color: var(--success); color: #0a0b0d; }
+    .steps li.done { color: #cfd6de; text-decoration: line-through; text-decoration-color: var(--muted-2); }
+
+    .actions { display: flex; gap: 8px; margin-top: 12px; }
+    .actions button {
+      font-family: inherit; font-size: 12.5px; font-weight: 600; border-radius: 9px;
+      padding: 7px 14px; cursor: pointer; transition: all .15s ease; border: 1px solid var(--line);
+    }
+    .btn-done { background: var(--gold); color: #1a1508; border-color: var(--gold); }
+    .btn-done:hover { filter: brightness(1.08); }
+    .btn-skip { background: transparent; color: var(--muted); }
+    .btn-skip:hover { color: var(--text); border-color: var(--muted-2); }
+    .btn-undo { background: transparent; color: var(--muted); border-style: dashed; }
+    .btn-undo:hover { color: var(--text); border-color: var(--muted-2); }
+
+    details.essentials { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; overflow: hidden; }
+    details.essentials summary {
+      list-style: none; cursor: pointer; padding: 12px 16px; font-size: 13px; color: var(--muted);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    details.essentials summary::-webkit-details-marker { display: none; }
+    details.essentials summary .caret { transition: transform .15s ease; color: var(--muted-2); }
+    details.essentials[open] summary .caret { transform: rotate(90deg); }
+    .essential-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 16px; border-top: 1px solid var(--line); font-size: 13px;
+    }
+    .essential-row .et { color: var(--muted); }
+    .essential-row .en { flex: 1; margin: 0 10px; }
+
+    .week-card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; margin-bottom: 10px; }
+    .week-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+    .week-day { font-size: 15px; font-weight: 700; }
+    .week-date { font-size: 11px; color: var(--muted-2); margin-left: 6px; }
+    .week-pct { font-size: 13px; font-weight: 700; color: var(--gold); }
+    .bar-track { height: 6px; background: rgba(255,255,255,0.06); border-radius: 4px; overflow: hidden; margin-bottom: 10px; }
+    .bar-fill { height: 100%; border-radius: 4px; background: var(--gold); }
+    .domain-dots { display: flex; gap: 14px; }
+    .ddot-wrap { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted-2); }
+    .ddot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--muted-2); }
+    .ddot.filled { background: var(--fill); border-color: var(--fill); }
+
+    footer.note { text-align: center; color: var(--muted-2); font-size: 12px; margin-top: 30px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <h1>Life OS</h1>
+      <span class="brand-badge">Raj · Mon–Sat office</span>
+    </div>
+    <div class="sub">Skin · Hair · Workout · Study — that's the whole list right now.</div>
+
+    <div class="tabs">
+      <button id="todayLink" class="active">Today</button>
+      <button id="weekLink">Week</button>
+    </div>
+
+    <div id="main">Loading…</div>
+    <footer class="note">Dance and everything else stays parked until these four are consistent.</footer>
+  </div>
+
+  <script>
+    const FOCUS = ["skin", "hair", "fitness", "learning"];
+    const DOMAIN = {
+      skin:     { label: "Skin",   color: "var(--skin)" },
+      hair:     { label: "Hair",   color: "var(--hair)" },
+      fitness:  { label: "Workout",color: "var(--fitness)" },
+      learning: { label: "Study",  color: "var(--learning)" },
+      health:   { label: "Health", color: "var(--muted-2)" },
+      career:   { label: "Office", color: "var(--muted-2)" },
+    };
+    const main = document.getElementById("main");
+    const todayBtn = document.getElementById("todayLink");
+    const weekBtn = document.getElementById("weekLink");
+
+    async function api(path, options) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    function setActive(btn) {
+      [todayBtn, weekBtn].forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    }
+
+    function ring(pct, label) {
+      const deg = Math.max(0, Math.min(100, pct)) * 3.6;
+      return `
+        <div class="ring">
+          <div class="ring-fill" style="background:conic-gradient(var(--gold) ${deg}deg, rgba(255,255,255,0.08) 0)"></div>
+          <div class="ring-inner">
+            <div class="ring-pct">${pct}%</div>
+            <div class="ring-label">${label}</div>
+          </div>
+        </div>`;
+    }
+
+    function focusCard(item) {
+      const meta = DOMAIN[item.domain] || DOMAIN.health;
+      const steps = (item.steps || []).map((s) =>
+        `<li class="${s.done ? "done" : ""}" data-item="${item._id}" data-step="${s.key}">
+          <span class="dot">${s.done ? "✓" : ""}</span><span>${s.label}</span>
+        </li>`
+      ).join("");
+      const actions = item.status === "pending"
+        ? `<div class="actions">
+            <button class="btn-done" data-act="done">Mark done</button>
+            <button class="btn-skip" data-act="skip">Skip</button>
+          </div>`
+        : `<div class="actions">
+            <button class="btn-undo" data-act="undo">Undo</button>
+          </div>`;
+      return `
+        <article class="card ${item.status}" data-id="${item._id}" style="--accent:${meta.color}">
+          <div class="card-row">
+            <div>
+              <span class="badge" style="--accent:${meta.color}">${meta.label}</span>
+              <div class="card-title">${item.title}</div>
+              <div class="card-time mono">${item.scheduledAt} · ${item.durationMin}m</div>
+            </div>
+            <div class="status-tag ${item.status}">${item.status}</div>
+          </div>
+          <ul class="steps">${steps}</ul>
+          ${actions}
+        </article>`;
+    }
+
+    function essentialRow(item) {
+      const dot = item.status === "done" ? "✓" : item.status === "skipped" ? "–" : "○";
+      const actions = item.status === "pending"
+        ? `<div class="actions" style="margin-top:0">
+            <button class="btn-done" data-act="done" style="padding:5px 10px;font-size:11.5px">Done</button>
+            <button class="btn-skip" data-act="skip" style="padding:5px 10px;font-size:11.5px">Skip</button>
+          </div>`
+        : `<div class="actions" style="margin-top:0">
+            <button class="btn-undo" data-act="undo" style="padding:5px 10px;font-size:11.5px">Undo</button>
+          </div>`;
+      return `
+        <div class="essential-row" data-id="${item._id}">
+          <span class="et mono">${item.scheduledAt}</span>
+          <span class="en">${dot} ${item.title}</span>
+          ${actions}
+        </div>`;
+    }
+
+    let currentDate = null;
+
+    async function renderToday() {
+      setActive(todayBtn);
+      main.innerHTML = "Loading…";
+      const data = await api("/api/today");
+      currentDate = data.date;
+      const focusItems = data.items.filter((i) => FOCUS.includes(i.domain));
+      const essentials = data.items.filter((i) => !FOCUS.includes(i.domain));
+      const focusDone = focusItems.filter((i) => i.status === "done").length;
+      const focusPct = focusItems.length ? Math.round((focusDone / focusItems.length) * 100) : 0;
+
+      const heroBody = data.next
+        ? `<div class="hero-kicker">Do this next</div>
+           <div class="hero-title">${data.next.title}</div>
+           <div class="hero-meta mono">${data.next.scheduledAt} · ${(DOMAIN[data.next.domain] || {}).label || data.next.domain}</div>`
+        : `<div class="hero-kicker">Focus</div><div class="hero-title">Everything for today is done.</div>`;
+
+      const hero = `
+        <section class="hero">
+          ${ring(focusPct, "focus")}
+          <div class="hero-body">
+            ${heroBody}
+            <div class="stats">
+              <span class="stat-chip">${data.date} · ${data.dayType}</span>
+              <span class="stat-chip">${focusDone}/${focusItems.length} of the 4</span>
+            </div>
+          </div>
+        </section>`;
+
+      const focusSection = `
+        <div class="section-label">Skin · Hair · Workout · Study</div>
+        ${focusItems.map(focusCard).join("")}`;
+
+      const essentialsSection = `
+        <details class="essentials">
+          <summary><span>Day essentials — wake, meals, office, sleep</span><span class="caret">›</span></summary>
+          ${essentials.map(essentialRow).join("")}
+        </details>`;
+
+      main.innerHTML = hero + focusSection + essentialsSection;
+      main.onclick = async (e) => {
+        const step = e.target.closest("li[data-step]");
+        const row = e.target.closest("[data-id]");
+        if (!row) return;
+        const id = row.dataset.id;
+        if (step) {
+          await api(`/api/items/${id}/steps/${step.dataset.step}`, { method: "POST", body: "{}" });
+          return renderToday();
+        }
+        if (e.target.dataset.act === "done") {
+          await api(`/api/items/${id}/complete`, { method: "POST", body: "{}" });
+          return renderToday();
+        }
+        if (e.target.dataset.act === "skip") {
+          await api(`/api/items/${id}/skip`, { method: "POST", body: JSON.stringify({ reason: "skipped from today" }) });
+          return renderToday();
+        }
+        if (e.target.dataset.act === "undo") {
+          await api(`/api/items/${id}/undo`, { method: "POST", body: "{}" });
+          return renderToday();
+        }
+      };
+    }
+
+    async function renderWeek() {
+      setActive(weekBtn);
+      main.innerHTML = "Loading…";
+      const data = await api("/api/week");
+      const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const fillVar = { skin: "var(--skin)", hair: "var(--hair)", fitness: "var(--fitness)", learning: "var(--learning)" };
+
+      main.innerHTML = `<div class="section-label">Last 7 days</div>` + data.days.map((d) => {
+        const pct = d.itemCount ? Math.round((d.completed / d.itemCount) * 100) : 0;
+        const byDomain = (d.score && d.score.byDomain) || {};
+        const dots = FOCUS.map((dom) => {
+          const b = byDomain[dom];
+          const filled = b && b.total > 0 && b.done >= b.total;
+          const partial = b && b.done > 0 && !filled;
+          return `<span class="ddot-wrap">
+            <span class="ddot ${filled ? "filled" : ""}" style="${filled ? `--fill:${fillVar[dom]}` : partial ? `border-color:${fillVar[dom]}` : ""}"></span>
+            ${(DOMAIN[dom] || {}).label}
+          </span>`;
+        }).join("");
+        return `
+          <div class="week-card">
+            <div class="week-top">
+              <div><span class="week-day">${names[d.weekday]}</span><span class="week-date mono">${d.date}</span></div>
+              <div class="week-pct">${pct}%</div>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+            <div class="domain-dots">${dots}</div>
+          </div>`;
+      }).join("");
+    }
+
+    todayBtn.onclick = () => renderToday().catch((e) => (main.textContent = e.message));
+    weekBtn.onclick = () => renderWeek().catch((e) => (main.textContent = e.message));
+    renderToday().catch((e) => (main.textContent = e.message));
+
+    async function checkForNewDay() {
+      if (document.hidden || !currentDate) return;
+      try {
+        const d = await api("/api/today");
+        if (d.date !== currentDate) location.reload();
+      } catch (_e) {
+        // network hiccup, try again on the next tick
+      }
+    }
+    setInterval(checkForNewDay, 60000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) checkForNewDay();
+    });
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  </script>
+</body>
+</html>

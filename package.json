@@ -1,0 +1,24 @@
+{
+  "name": "life-os",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/api",
+    "apps/mobile"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/api",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:mobile": "npm run start --workspace=apps/mobile",
+    "start": "npm run start --workspace=@life-os/api",
+    "seed": "npm run seed --workspace=apps/api",
+    "demo:backfill": "npm run demo:backfill --workspace=apps/api",
+    "demo:clear": "npm run demo:clear --workspace=apps/api",
+    "monitor": "node scripts/monitor.js",
+    "docker:up": "docker compose up -d mongo",
+    "android:release": "bash scripts/build-android-release.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

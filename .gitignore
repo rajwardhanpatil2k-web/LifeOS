@@ -1,0 +1,23 @@
+node_modules
+.expo
+.expo-shared
+dist
+build
+coverage
+.env
+.env.local
+*.log
+.DS_Store
+ios
+web-build
+.vscode
+mongo-data
+
+# android/ is hand-maintained (native wake-alarm module) and committed;
+# only ignore its generated build output and local machine config.
+apps/mobile/android/build
+apps/mobile/android/app/build
+apps/mobile/android/.gradle
+apps/mobile/android/local.properties
+apps/mobile/android/.idea
+apps/mobile/android/*.iml

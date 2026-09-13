@@ -1,0 +1,22 @@
+{
+  "name": "@life-os/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "seed": "node src/seed/run.js",
+    "demo:backfill": "node src/seed/backfillDemo.js",
+    "demo:clear": "node src/seed/backfillDemo.js --clear"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongoose": "^8.9.5"
+  }
+}
