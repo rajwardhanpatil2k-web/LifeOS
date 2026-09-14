@@ -212,4 +212,30 @@ class WakeAlarmModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
       promise.reject("OPEN_SETTINGS_FAILED", e)
     }
   }
+
+  @ReactMethod
+  fun getPref(key: String, promise: Promise) {
+    try {
+      val value = reactApplicationContext
+        .getSharedPreferences("lifeos", android.content.Context.MODE_PRIVATE)
+        .getString(key, null)
+      promise.resolve(value)
+    } catch (e: Exception) {
+      promise.reject("GET_PREF_FAILED", e)
+    }
+  }
+
+  @ReactMethod
+  fun setPref(key: String, value: String, promise: Promise) {
+    try {
+      reactApplicationContext
+        .getSharedPreferences("lifeos", android.content.Context.MODE_PRIVATE)
+        .edit()
+        .putString(key, value)
+        .apply()
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("SET_PREF_FAILED", e)
+    }
+  }
 }

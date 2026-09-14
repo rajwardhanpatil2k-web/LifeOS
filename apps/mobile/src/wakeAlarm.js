@@ -42,6 +42,15 @@ export async function isWakeAlarmRinging() {
   return WakeAlarmModule.isRinging();
 }
 
+export function nextWakeMillis(scheduledAtHHMM, now = Date.now()) {
+  const parsed = parseHHMM(scheduledAtHHMM);
+  if (!parsed) return -1;
+  const date = new Date(now);
+  date.setHours(parsed.hour, parsed.minute, 0, 0);
+  if (date.getTime() < now + 2_000) date.setDate(date.getDate() + 1);
+  return date.getTime();
+}
+
 export async function canScheduleExactAlarms() {
   if (!available) return true;
   return WakeAlarmModule.canScheduleExactAlarms();

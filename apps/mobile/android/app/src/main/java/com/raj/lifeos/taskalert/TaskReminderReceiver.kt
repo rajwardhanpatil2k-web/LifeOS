@@ -21,8 +21,16 @@ class TaskReminderReceiver : BroadcastReceiver() {
         domain = intent.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty()
       )
 
-      if (AlarmRingingService.isRinging() || TaskCallState.ringing) {
+      if (AlarmRingingService.isRinging() || TaskCallState.busy()) {
         TaskCallQueue.enqueue(context, reminder)
+        return
+      }
+
+      val pause = TaskReminderScheduler.pausedUntil(context)
+      if (pause > System.currentTimeMillis()) {
+        if (reminder.id.isNotBlank()) {
+          TaskReminderScheduler.schedule(context, reminder.copy(at = pause))
+        }
         return
       }
 

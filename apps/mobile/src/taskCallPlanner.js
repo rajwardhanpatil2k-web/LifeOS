@@ -1,5 +1,6 @@
 import { composeEndCallCue, composeStartCallCue } from "./voiceAgent";
 import {
+  AFTER_CALL_COOLDOWN_MS,
   CALL_GAP_MS,
   durationOf,
   END_CALL_LEAD_MS,
@@ -41,20 +42,41 @@ function pullEndBeforeNextStart(item, endAt, pending) {
   return Math.max(earliest, nextStart - END_CALL_LEAD_MS);
 }
 
-function draftCall(item, pending, now) {
+function clampPause(at, now, pausedUntil) {
+  if (pausedUntil > now && at < pausedUntil) return pausedUntil;
+  return at;
+}
+
+function otherInProgressUntil(item, pending) {
+  let until = 0;
+  for (const other of pending) {
+    if (!other.startedAt) continue;
+    if (String(other._id) === String(item._id)) continue;
+    const endAt = Math.max(endTimeMillis(other), parseMillis(other.followUpUntil));
+    if (endAt > until) until = endAt + CALL_GAP_MS;
+  }
+  return until;
+}
+
+function draftCall(item, pending, now, pausedUntil = 0) {
+  const busyUntil = otherInProgressUntil(item, pending);
+
   if (item.startedAt) {
     let at = Math.max(endTimeMillis(item), parseMillis(item.followUpUntil));
     at = pullEndBeforeNextStart(item, at, pending);
     if (at <= now + 1_000) at = now + 4_000;
+    at = clampPause(at, now, pausedUntil);
     return { item, phase: "end", at, flexible: !!item.followUpUntil };
   }
 
   let at = Math.max(startMillis(item.scheduledAt), parseMillis(item.snoozeUntil));
   if (at <= now + 1_000) {
     const recentlyDue = startMillis(item.scheduledAt) > now - 4 * 60 * 60 * 1000;
-    if (parseMillis(item.snoozeUntil) || recentlyDue) at = now + 4_000;
+    if (parseMillis(item.snoozeUntil) || recentlyDue) at = now + AFTER_CALL_COOLDOWN_MS;
     else return null;
   }
+  at = Math.max(at, busyUntil);
+  at = clampPause(at, now, pausedUntil);
   return { item, phase: "start", at, flexible: !!item.snoozeUntil };
 }
 
@@ -85,7 +107,11 @@ function spaceCalls(drafts, now) {
 
   const placed = [];
   for (const draft of sorted) {
-    const at = nextFreeSlot(Math.max(draft.at, now + 2_000), placed.map((row) => row.at));
+    const floor =
+      draft.phase === "end" || draft.at > now + AFTER_CALL_COOLDOWN_MS
+        ? now + 2_000
+        : now + AFTER_CALL_COOLDOWN_MS;
+    const at = nextFreeSlot(Math.max(draft.at, floor), placed.map((row) => row.at));
     placed.push({ ...draft, at });
   }
   return placed;
@@ -111,11 +137,12 @@ function toReminder(draft, { voiceAlerts, name }) {
   };
 }
 
-export function planTaskCalls(items, { now = Date.now(), voiceAlerts = true, name = "Raj" } = {}) {
+export function planTaskCalls(items, { now = Date.now(), voiceAlerts = true, name = "Raj", pausedUntil = 0 } = {}) {
   const pending = (items || []).filter(isCallableItem);
+  const pauseMs = Number(pausedUntil) > now ? Number(pausedUntil) : 0;
   const drafts = [];
   for (const item of pending) {
-    const draft = draftCall(item, pending, now);
+    const draft = draftCall(item, pending, now, pauseMs);
     if (draft) drafts.push(draft);
   }
   return spaceCalls(drafts, now).map((draft) => toReminder(draft, { voiceAlerts, name }));

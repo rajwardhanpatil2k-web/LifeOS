@@ -1,9 +1,9 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
 import { useDispatch, useSelector } from "react-redux";
 import { fetchInsightReport, fetchInsights, setInsightDate, setInsightPeriod } from "../store";
 import { useTheme } from "../hooks/useTheme";
+import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 
 const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -35,15 +35,22 @@ export default function InsightsScreen() {
   const { colors, domainMeta } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  // Numbers and narration are fetched separately so the charts don't wait on
-  // a possible OpenAI round trip. The report call returns the same stats, so
-  // whichever lands second just reconciles.
-  useFocusEffect(
-    useCallback(() => {
-      dispatch(fetchInsights({ period, date }));
-      dispatch(fetchInsightReport({ period, date }));
-    }, [dispatch, period, date])
-  );
+  const refreshInsights = useCallback(async () => {
+    await dispatch(fetchInsights({ period, date }));
+  }, [dispatch, period, date]);
+
+  const refreshReport = useCallback(async () => {
+    if (report) return;
+    await dispatch(fetchInsightReport({ period, date }));
+  }, [dispatch, period, date, report]);
+
+  useEffect(() => {
+    dispatch(fetchInsights({ period, date }));
+    if (!report) dispatch(fetchInsightReport({ period, date }));
+  }, [dispatch, period, date]);
+
+  useStaleFocusRefresh(refreshInsights, 90000, Boolean(stats));
+  useStaleFocusRefresh(refreshReport, 300000, Boolean(stats) && !report);
 
   const goPeriod = (delta) => {
     if (!stats) return;

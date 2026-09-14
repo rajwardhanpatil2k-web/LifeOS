@@ -20,6 +20,14 @@ const UserSchema = new mongoose.Schema(
       default: ["skin", "hair", "fitness", "learning"],
     },
     deferred: { type: [String], default: ["dance"] },
+    focusBlock: {
+      active: { type: Boolean, default: false },
+      startedAt: Date,
+      until: Date,
+      reason: { type: String, default: "" },
+      resumeMode: { type: String, default: "catch_up" },
+      source: { type: String, default: "ai" },
+    },
   },
   { timestamps: true }
 );
@@ -96,6 +104,8 @@ const PlanItemSchema = new mongoose.Schema(
     startedAt: Date,
     snoozeUntil: Date,
     followUpUntil: Date,
+    heldUntil: Date,
+    holdReason: { type: String, default: undefined },
     steps: [StepSchema],
   },
   { _id: true }

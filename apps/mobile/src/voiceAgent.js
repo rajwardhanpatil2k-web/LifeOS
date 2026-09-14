@@ -164,47 +164,110 @@ export function composeSpokenCue(item, name = "Raj") {
 }
 
 export function composeStartCallCue(item, name = "Raj") {
-  const { hour } = spokenClock(item.scheduledAt);
-  const greet = greetingFor(item, name || "Raj", hour);
-  return `${greet} ${taskLine(item)} Answer if you are ready, or reject to snooze five minutes.`;
+  const title = soften(item.title) || "your next task";
+  return `Hey ${name || "Raj"}. ${title}.`;
 }
 
 export function composeEndCallCue(item, name = "Raj") {
   const title = soften(item.title) || "the task";
-  return `Hey ${name || "Raj"}. Time is up for ${title}. Answer if you finished, or reject to remind you in fifteen minutes.`;
+  return `Hey ${name || "Raj"}. ${title}. Time is up.`;
 }
 
 export function composeReadyPrompt(item) {
   const title = soften(item.title) || "this task";
-  return `Are you ready to start ${title}? Say ready, or not now.`;
+  return `${title}. Are you ready?`;
 }
 
 export function composeCompletePrompt(item) {
   const title = soften(item.title) || "this task";
-  return `Did you complete ${title}? Say done, or say remind me.`;
+  return `${title}. Did you finish?`;
 }
 
-export function interpretCallReply(text, phase) {
-  const spoken = String(text || "").toLowerCase().replace(/['’]/g, "").trim();
-  if (!spoken) return null;
-  // The spoken prompt itself contains "ready" / "done" — ignore long echoes.
-  if (spoken.split(/\s+/).length > 8) return null;
-  if (/are you ready|say ready|say done|did you complete|remind me to ring/.test(spoken)) return null;
+export function interpretDeferMinutes(text) {
+  const spoken = String(text || "").toLowerCase().replace(/['’]/g, "");
+  if (!spoken) return 0;
+  if (/\b(forty[\s-]?five|45)\b/.test(spoken) && /\b(min|later|after|in)\b/.test(spoken)) return 45;
+  if (/\b(thirty|30)\b/.test(spoken) && /\b(min|later|after|in)\b/.test(spoken)) return 30;
+  const match = spoken.match(/\b(?:in|after)\s+(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b/);
+  if (!match) return 0;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (/^h/.test(match[2])) return Math.min(240, n * 60);
+  return Math.min(240, n);
+}
+
+function normalizeHeard(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[?.!,]/g, " ")
+    .replace(/\b(uh|um|erm|hmm|ah)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPromptEcho(spoken, prompt) {
+  if (!spoken) return true;
+  if (/^(forest|for this|for rest|for the|this task)$/.test(spoken)) return true;
+  const promptText = normalizeHeard(prompt);
+  if (promptText) {
+    if (spoken === promptText) return true;
+    if (promptText.includes(spoken) && spoken.split(" ").length >= 3) return true;
+    if (spoken.includes(promptText) && !/\b(yes|yeah|yep|yup|ok|okay|no|not|later)\b/.test(spoken)) return true;
+  }
+  if (/are you ready/.test(spoken) && !/\b(yes|yeah|i am|im|i m)\b/.test(spoken)) return true;
+  if (/\bready for\b/.test(spoken) && !/\b(yes|yeah|i am|im|i m|ok|okay)\b/.test(spoken)) return true;
+  if (/did you (finish|complete)/.test(spoken) && !/\b(yes|yeah|i did|i have|done)\b/.test(spoken)) return true;
+  return false;
+}
+
+function meaningFromHeard(spoken, phase) {
+  if (interpretDeferMinutes(spoken)) return phase === "end" || phase === "complete" ? "remind" : "snooze";
 
   const isEnd = phase === "end" || phase === "complete";
   if (isEnd) {
-    if (/\b(not done|not yet|havent|have not|didnt|did not|remind|later|incomplete)\b/.test(spoken)) {
+    if (/\b(not done|not yet|havent|have not|didnt|did not|remind me|later|incomplete|skip|wait)\b/.test(spoken)) {
       return "remind";
     }
-    if (/\bno\b/.test(spoken)) return "remind";
-    if (/\b(done|complete|completed|finished|yes|yeah|yep|i did|i have)\b/.test(spoken)) {
+    if (/\b(no|nope)\b/.test(spoken) && !/\bnow\b/.test(spoken)) return "remind";
+    if (/\b(done|complete|completed|finished|finish|yes|yeah|yep|yup|yup i did|i did|i have|sure)\b/.test(spoken)) {
       return "complete";
     }
     return null;
   }
 
-  if (/\b(not now|not ready|later|snooze|busy|reject|no)\b/.test(spoken)) return "snooze";
-  if (/\b(ready|yes|yeah|yep|ok|okay|start|i am ready|im ready)\b/.test(spoken)) return "ready";
+  if (/\b(not now|not ready|later|snooze|busy|reject|nope|wait|hold on)\b/.test(spoken)) return "snooze";
+  if (/\bno\b/.test(spoken) && !/\bnow\b/.test(spoken)) return "snooze";
+  if (/\b(ready|already|reddy|yes|yeah|yep|yup|ok|okay|start|sure|go ahead|lets go|let us go|im ready|i m ready|i am ready)\b/.test(spoken)) {
+    return "ready";
+  }
+  return null;
+}
+
+export function interpretCallReply(text, phase, prompt) {
+  const spoken = normalizeHeard(text);
+  if (!spoken || isPromptEcho(spoken, prompt)) return null;
+
+  const words = spoken.split(" ").filter(Boolean);
+  const tail = words.slice(-4).join(" ");
+  return meaningFromHeard(spoken, phase) || (tail !== spoken ? meaningFromHeard(tail, phase) : null);
+}
+
+export function interpretCallReplies(texts, phase, prompt) {
+  const list = (Array.isArray(texts) ? texts : [texts])
+    .map((row) => String(row || "").trim())
+    .filter(Boolean);
+  const expanded = [];
+  for (const text of list) {
+    expanded.push(text);
+    const words = normalizeHeard(text).split(" ").filter(Boolean);
+    if (words.length > 2) expanded.push(words.slice(-3).join(" "));
+  }
+  for (const text of expanded) {
+    const meaning = interpretCallReply(text, phase, prompt);
+    if (meaning) return meaning;
+  }
+  if (list.length) return interpretCallReply(list.join(" "), phase, prompt);
   return null;
 }
 

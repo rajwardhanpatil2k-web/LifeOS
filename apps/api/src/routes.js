@@ -9,8 +9,17 @@ const { LIFE_AREAS, seasonalFruitsForMonth } = require("./seed/rajRoutine");
 const { computePeriodStats } = require("./insights");
 const { getInsightReport } = require("./insightReport");
 const { isAiEnabled } = require("./ai");
-const { mergeCarryForwards, setCarryForwardStatus, createVoiceTask } = require("./voiceTask");
+const { mergeCarryForwards, setCarryForwardStatus } = require("./voiceTask");
 const { mergeTomorrowPrep, previewPrepItem, isLockedItem, PREP_KEY } = require("./tomorrowPrep");
+const { runAssistant } = require("./voiceAssistant");
+const {
+  publicFocusBlock,
+  expireFocusBlockIfNeeded,
+  startFocusBlock,
+  extendFocusBlock,
+  resumeFocusBlock,
+  previewForPause,
+} = require("./focusBlock");
 
 function todayIST(dateInput) {
   if (dateInput) return dateInput;
@@ -192,6 +201,28 @@ async function saveScore(user, plan) {
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+function clearItemHold(item) {
+  item.snoozeUntil = undefined;
+  item.followUpUntil = undefined;
+  item.heldUntil = undefined;
+  item.holdReason = undefined;
+}
+
+async function logSkippedDuringFocus(user, date, skipped) {
+  for (const item of skipped || []) {
+    await LifeEvent.create({
+      userId: user._id,
+      date,
+      domain: item.domain,
+      type: "skip_item",
+      itemKey: item.key,
+      status: "skipped",
+      notes: item.skippedReason || "missed_during_focus",
+      source: "focus_block",
+    });
+  }
+}
+
 function registerRoutes(app) {
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "life-os-api" });
@@ -212,6 +243,10 @@ function registerRoutes(app) {
     const date = todayIST(req.query.date);
     const plan = await ensureDailyPlan(user, date);
     const hhmm = nowHHMM();
+    if (expireFocusBlockIfNeeded(user)) {
+      if (typeof user.markModified === "function") user.markModified("focusBlock");
+      await user.save();
+    }
     const scored = await saveScore(user, plan);
     res.json({
       date,
@@ -222,6 +257,7 @@ function registerRoutes(app) {
       items: plan.items,
       score: scored,
       focus: ["skin", "hair", "fitness", "learning"],
+      focusBlock: publicFocusBlock(user),
     });
   }));
 
@@ -232,8 +268,7 @@ function registerRoutes(app) {
     const item = plan.items.id(req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     item.status = "done";
-    item.snoozeUntil = undefined;
-    item.followUpUntil = undefined;
+    clearItemHold(item);
     item.steps.forEach((s) => {
       s.done = true;
       s.doneAt = s.doneAt || new Date();
@@ -260,9 +295,8 @@ function registerRoutes(app) {
     const item = plan.items.id(req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     item.status = "skipped";
-    item.skippedReason = req.body.reason || req.body.reason || "skipped";
-    item.snoozeUntil = undefined;
-    item.followUpUntil = undefined;
+    item.skippedReason = req.body.reason || "skipped";
+    clearItemHold(item);
     await plan.save();
     await LifeEvent.create({
       userId: user._id,
@@ -287,8 +321,7 @@ function registerRoutes(app) {
     item.status = "pending";
     item.skippedReason = undefined;
     item.startedAt = undefined;
-    item.snoozeUntil = undefined;
-    item.followUpUntil = undefined;
+    clearItemHold(item);
     item.steps.forEach((s) => {
       s.done = false;
       s.doneAt = null;
@@ -326,8 +359,7 @@ function registerRoutes(app) {
     step.doneAt = step.done ? new Date() : null;
     if (item.steps.length && item.steps.every((s) => s.done)) {
       item.status = "done";
-      item.snoozeUntil = undefined;
-      item.followUpUntil = undefined;
+      clearItemHold(item);
       await setCarryForwardStatus(user, item, "done");
     } else if (item.status === "done") {
       // It auto-completed because every step was checked — now one isn't,
@@ -363,8 +395,7 @@ function registerRoutes(app) {
       return res.status(400).json({ error: "Item is no longer pending" });
     }
     item.startedAt = new Date();
-    item.snoozeUntil = undefined;
-    item.followUpUntil = undefined;
+    clearItemHold(item);
     await plan.save();
     await LifeEvent.create({
       userId: user._id,
@@ -478,8 +509,7 @@ function registerRoutes(app) {
       // Manual time edits for today shouldn't be overwritten by a later wake/home tweak.
       item.anchor = "fixed";
       item.startedAt = undefined;
-      item.snoozeUntil = undefined;
-      item.followUpUntil = undefined;
+      clearItemHold(item);
       if (item.key === PREP_KEY) {
         user.prepTarget = scheduledAt;
         await user.save();
@@ -589,26 +619,147 @@ function registerRoutes(app) {
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
     const transcript = String(req.body.transcript || "").trim();
-    if (transcript.length < 3) return res.status(400).json({ error: "Say the task you want to add." });
+    if (transcript.length < 3) {
+      return res.status(400).json({ error: "Say a task, pause alarms, or remind you later." });
+    }
 
-    const { item, parsed } = await createVoiceTask(user, plan, transcript);
+    const result = await runAssistant(user, plan, transcript);
+    if (result.intent === "unknown") {
+      return res.status(400).json({
+        error: result.error || "I can add a task, pause alarms, or remind you later.",
+        intent: "unknown",
+      });
+    }
+
+    await plan.save();
+    if (typeof user.markModified === "function") user.markModified("focusBlock");
+    await user.save();
+
+    const eventType =
+      result.intent === "pause_focus"
+        ? "focus_block"
+        : result.intent === "extend_focus"
+          ? "focus_extend"
+          : result.intent === "resume_focus"
+            ? "focus_resume"
+            : result.intent === "defer_task"
+              ? "defer_item"
+              : "add_voice_task";
     await LifeEvent.create({
       userId: user._id,
       date,
-      domain: parsed.domain,
-      type: "add_voice_task",
-      itemKey: item.key,
-      status: "pending",
+      domain: result.item?.domain || "ops",
+      type: eventType,
+      itemKey: result.item?.key,
+      status: result.intent === "pause_focus" ? "paused" : "pending",
       notes: transcript,
+      meta: {
+        intent: result.intent,
+        until: result.preview?.scheduledAt,
+        reason: result.preview?.reason,
+      },
       source: "ai",
     });
+    await logSkippedDuringFocus(user, date, result.skipped);
     const scored = await saveScore(user, plan);
     res.json({
-      item,
-      parsed,
+      intent: result.intent,
+      item: result.item || null,
+      parsed: result.parsed,
+      preview: result.preview,
       items: plan.items,
       score: scored,
       next: nextAction(plan.items, nowHHMM()),
+      focusBlock: publicFocusBlock(user),
+    });
+  }));
+
+  app.post("/api/focus/pause", wrap(async (req, res) => {
+    const user = await getUser();
+    const date = todayIST(req.body.date);
+    const plan = await ensureDailyPlan(user, date);
+    const result = startFocusBlock(user, plan, {
+      durationMin: req.body.durationMin,
+      untilClock: req.body.until,
+      reason: req.body.reason,
+      source: req.body.source || "manual",
+    });
+    await plan.save();
+    if (typeof user.markModified === "function") user.markModified("focusBlock");
+    await user.save();
+    await LifeEvent.create({
+      userId: user._id,
+      date,
+      domain: "ops",
+      type: "focus_block",
+      status: "paused",
+      notes: result.reason,
+      meta: { until: result.until },
+      source: req.body.source || "manual",
+    });
+    await logSkippedDuringFocus(user, date, result.skipped);
+    const scored = await saveScore(user, plan);
+    res.json({
+      items: plan.items,
+      score: scored,
+      next: nextAction(plan.items, nowHHMM()),
+      focusBlock: publicFocusBlock(user),
+      preview: previewForPause(result.until, result.reason),
+    });
+  }));
+
+  app.post("/api/focus/extend", wrap(async (req, res) => {
+    const user = await getUser();
+    const date = todayIST(req.body.date);
+    const plan = await ensureDailyPlan(user, date);
+    const result = extendFocusBlock(user, plan, req.body.minutes || 30);
+    await plan.save();
+    if (typeof user.markModified === "function") user.markModified("focusBlock");
+    await user.save();
+    await LifeEvent.create({
+      userId: user._id,
+      date,
+      domain: "ops",
+      type: "focus_extend",
+      status: "paused",
+      notes: `+${result.extraMin}m`,
+      meta: { until: result.until },
+      source: req.body.source || "manual",
+    });
+    await logSkippedDuringFocus(user, date, result.skipped);
+    const scored = await saveScore(user, plan);
+    res.json({
+      items: plan.items,
+      score: scored,
+      next: nextAction(plan.items, nowHHMM()),
+      focusBlock: publicFocusBlock(user),
+    });
+  }));
+
+  app.post("/api/focus/resume", wrap(async (req, res) => {
+    const user = await getUser();
+    const date = todayIST(req.body.date);
+    const plan = await ensureDailyPlan(user, date);
+    const result = resumeFocusBlock(user, plan);
+    await plan.save();
+    if (typeof user.markModified === "function") user.markModified("focusBlock");
+    await user.save();
+    await LifeEvent.create({
+      userId: user._id,
+      date,
+      domain: "ops",
+      type: "focus_resume",
+      status: "pending",
+      notes: result.reason,
+      source: req.body.source || "manual",
+    });
+    await logSkippedDuringFocus(user, date, result.skipped);
+    const scored = await saveScore(user, plan);
+    res.json({
+      items: plan.items,
+      score: scored,
+      next: nextAction(plan.items, nowHHMM()),
+      focusBlock: publicFocusBlock(user),
     });
   }));
 

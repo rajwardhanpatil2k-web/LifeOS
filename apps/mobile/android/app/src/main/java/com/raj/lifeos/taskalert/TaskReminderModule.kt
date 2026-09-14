@@ -18,6 +18,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.util.LinkedHashSet
 import java.util.Locale
 
 class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
@@ -30,6 +31,16 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   private var speakPromise: Promise? = null
 
   override fun getName(): String = "TaskReminderModule"
+
+  @ReactMethod
+  fun setPausedUntil(untilMs: Double, promise: Promise) {
+    try {
+      TaskReminderScheduler.setPausedUntil(reactApplicationContext, untilMs.toLong())
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("TASK_REMINDER_PAUSE_FAILED", e)
+    }
+  }
 
   @ReactMethod
   fun setEnabled(enabled: Boolean, promise: Promise) {
@@ -204,6 +215,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun setCallUiVisible(visible: Boolean, promise: Promise) {
     try {
+      TaskCallState.inSession = visible || TaskCallState.ringing
       if (visible) TaskAlertService.hideNotification(reactApplicationContext)
       else TaskAlertService.showNotification(reactApplicationContext)
       promise.resolve(true)
@@ -264,10 +276,31 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
         } else if (promptTtsReady) {
           speakPendingPrompt()
         }
+        armSpeakTimeout()
       } catch (e: Exception) {
         speakPromise = null
         promise.reject("TASK_SPEAK_FAILED", e)
       }
+    }
+  }
+
+  @ReactMethod
+  fun cancelSpeak(promise: Promise) {
+    mainHandler.post {
+      pendingPrompt = null
+      try { promptTts?.stop() } catch (_: Exception) {}
+      finishSpeak(true)
+      promise.resolve(true)
+    }
+  }
+
+  @ReactMethod
+  fun silenceAlert(promise: Promise) {
+    try {
+      TaskAlertService.silence(reactApplicationContext)
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("TASK_REMINDER_SILENCE_FAILED", e)
     }
   }
 
@@ -332,20 +365,25 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
           }
           override fun onResults(results: Bundle?) {
             listening = false
-            val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-            emit("TaskCallSpeech", "result", spoken)
+            val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
+            emit("TaskCallSpeech", "result", spoken.firstOrNull().orEmpty(), spoken)
           }
           override fun onPartialResults(partialResults: Bundle?) {
-            val spoken = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-            if (spoken.isNotBlank()) emit("TaskCallSpeech", "partial", spoken)
+            val spoken = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
+            val first = spoken.firstOrNull().orEmpty()
+            if (first.isNotBlank()) emit("TaskCallSpeech", "partial", first, spoken)
           }
           override fun onEvent(eventType: Int, params: Bundle?) {}
         })
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale("en", "IN").toLanguageTag())
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-IN")
         intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500)
+        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
+        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500)
         listening = true
         engine.startListening(intent)
         promise.resolve(true)
@@ -370,6 +408,14 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun removeListeners(count: Int) {}
 
+  private var speakTimeout: Runnable? = null
+
+  private fun armSpeakTimeout() {
+    speakTimeout?.let { mainHandler.removeCallbacks(it) }
+    speakTimeout = Runnable { finishSpeak(true) }
+    mainHandler.postDelayed(speakTimeout!!, 8_000L)
+  }
+
   private fun speakPendingPrompt() {
     val text = pendingPrompt ?: return
     pendingPrompt = null
@@ -382,9 +428,12 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   }
 
   private fun finishSpeak(ok: Boolean) {
+    speakTimeout?.let { mainHandler.removeCallbacks(it) }
+    speakTimeout = null
+    pendingPrompt = null
+    try { promptTts?.stop() } catch (_: Exception) {}
     val promise = speakPromise
     speakPromise = null
-    pendingPrompt = null
     try { promise?.resolve(ok) } catch (_: Exception) {}
   }
 
@@ -396,11 +445,17 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
     recognizer = null
   }
 
-  private fun emit(event: String, type: String, text: String) {
+  private fun emit(event: String, type: String, text: String, alternatives: List<String> = emptyList()) {
     try {
       val map = Arguments.createMap()
       map.putString("type", type)
       map.putString("text", text)
+      val rows = Arguments.createArray()
+      val unique = LinkedHashSet<String>()
+      if (text.isNotBlank()) unique.add(text)
+      for (row in alternatives) if (row.isNotBlank()) unique.add(row)
+      for (row in unique) rows.pushString(row)
+      map.putArray("alternatives", rows)
       reactApplicationContext
         .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
         .emit(event, map)

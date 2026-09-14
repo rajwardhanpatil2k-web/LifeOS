@@ -14,6 +14,9 @@ object TaskCallState {
   @Volatile
   var ringing = false
 
+  @Volatile
+  var inSession = false
+
   data class ActiveCall(
     val id: String,
     val title: String,
@@ -25,6 +28,7 @@ object TaskCallState {
   )
 
   fun setActive(context: Context, call: ActiveCall) {
+    inSession = true
     val obj = JSONObject()
     obj.put("id", call.id)
     obj.put("title", call.title)
@@ -40,10 +44,13 @@ object TaskCallState {
 
   fun clear(context: Context) {
     ringing = false
+    inSession = false
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
       .remove(KEY_ACTIVE)
       .apply()
   }
+
+  fun busy(): Boolean = ringing || inSession
 
   fun read(context: Context): ActiveCall? {
     val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ACTIVE, null)

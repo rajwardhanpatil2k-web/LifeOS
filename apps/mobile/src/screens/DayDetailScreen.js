@@ -5,6 +5,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { completeItem, fetchDay, skipItem, toggleStep, undoItem } from "../store";
 import { useTheme } from "../hooks/useTheme";
 import { formatClock12 } from "../formatTime";
+import { AI_COLOR } from "../theme";
 
 const NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -72,13 +73,21 @@ export default function DayDetailScreen({ route }) {
 
 function DayItem({ item, interactive, dispatch, styles, domainMeta }) {
   const meta = domainMeta(item.domain);
+  const isAi = item.source === "ai" || item.carryForward;
   const mark = item.status === "done" ? "✓ Done" : item.status === "skipped" ? "– Skipped" : null;
   return (
-    <View style={[styles.card, { borderLeftColor: meta.color }, item.status !== "pending" && styles.faded]}>
+    <View style={[styles.card, { borderLeftColor: isAi ? AI_COLOR : meta.color }, isAi && styles.cardAi, item.status !== "pending" && styles.faded]}>
       <View style={styles.topRow}>
         <Text style={styles.time}>{formatClock12(item.scheduledAt)}</Text>
-        <View style={[styles.badge, { backgroundColor: meta.color + "29" }]}>
-          <Text style={[styles.badgeText, { color: meta.color }]}>{meta.label}</Text>
+        <View style={styles.badgeRow}>
+          <View style={[styles.badge, { backgroundColor: (isAi ? AI_COLOR : meta.color) + "29" }]}>
+            <Text style={[styles.badgeText, { color: isAi ? AI_COLOR : meta.color }]}>{meta.label}</Text>
+          </View>
+          {isAi ? (
+            <View style={styles.aiBadge}>
+              <Text style={styles.aiBadgeText}>AI</Text>
+            </View>
+          ) : null}
         </View>
       </View>
       <Text style={styles.title}>{item.title}</Text>
@@ -157,10 +166,23 @@ function createStyles(colors) {
       marginBottom: 12,
     },
     faded: { opacity: 0.6 },
+    cardAi: {
+      backgroundColor: "rgba(109,140,255,0.10)",
+      borderColor: "rgba(109,140,255,0.45)",
+    },
     topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
     time: { color: colors.muted, fontSize: 12.5, fontWeight: "700" },
+    badgeRow: { flexDirection: "row", gap: 6, alignItems: "center" },
     badge: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
     badgeText: { fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 },
+    aiBadge: {
+      borderRadius: 6,
+      borderWidth: 1,
+      borderColor: "rgba(109,140,255,0.5)",
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+    },
+    aiBadgeText: { fontSize: 9.5, fontWeight: "700", color: "#6d8cff", textTransform: "uppercase", letterSpacing: 0.4 },
     title: { color: colors.text, fontSize: 15.5, fontWeight: "600", marginBottom: 4 },
 
     stepRow: { flexDirection: "row", alignItems: "flex-start", gap: 9, marginTop: 9 },

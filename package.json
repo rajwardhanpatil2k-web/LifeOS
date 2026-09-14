@@ -10,13 +10,15 @@
     "dev": "npm run dev --workspace=apps/api",
     "dev:api": "npm run dev --workspace=apps/api",
     "dev:mobile": "npm run start --workspace=apps/mobile",
+    "dev:phone": "bash scripts/dev-phone.sh",
     "start": "npm run start --workspace=@life-os/api",
     "seed": "npm run seed --workspace=apps/api",
     "demo:backfill": "npm run demo:backfill --workspace=apps/api",
     "demo:clear": "npm run demo:clear --workspace=apps/api",
     "monitor": "node scripts/monitor.js",
     "docker:up": "docker compose up -d mongo",
-    "android:release": "bash scripts/build-android-release.sh"
+    "android:release": "bash scripts/build-android-release.sh",
+    "android:debug": "bash scripts/build-android-debug.sh"
   },
   "engines": {
     "node": ">=18"

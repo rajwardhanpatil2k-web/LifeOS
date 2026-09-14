@@ -122,7 +122,7 @@ export async function ensureNotificationSetup() {
 // how often it's called (focus, foreground, interval, after every action).
 let lastScheduledIds = [];
 
-export async function syncTodayReminders(items, { name = "Raj" } = {}) {
+export async function syncTodayReminders(items, { name = "Raj", pausedUntil = 0 } = {}) {
   await Promise.all(
     lastScheduledIds.map((id) =>
       Notifications.cancelScheduledNotificationAsync(id).catch(() => {})
@@ -133,7 +133,7 @@ export async function syncTodayReminders(items, { name = "Raj" } = {}) {
   if (!Array.isArray(items) || items.length === 0) return;
 
   const nextIds = [];
-  const planned = planTaskCalls(items, { name });
+  const planned = planTaskCalls(items, { name, pausedUntil });
 
   for (const reminder of planned) {
     const item = reminder.item;

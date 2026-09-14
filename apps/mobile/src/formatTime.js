@@ -7,3 +7,14 @@ export function formatClock12(hhmm) {
   const hour12 = hour % 12 || 12;
   return `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
 }
+
+export function formatIsoClock12(iso) {
+  const at = new Date(iso);
+  if (!iso || !Number.isFinite(at.getTime())) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(at);
+}

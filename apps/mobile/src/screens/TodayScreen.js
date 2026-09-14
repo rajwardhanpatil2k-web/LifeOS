@@ -1,25 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useDispatch, useSelector } from "react-redux";
-import { completeItem, fetchToday, reorderItems, skipItem, toggleStep, undoItem } from "../store";
-import { FOCUS_DOMAINS } from "../theme";
+import { completeItem, fetchToday, reorderItems, skipItem, toggleStep, undoItem, resumeFocus, extendFocus } from "../store";
+import { FOCUS_DOMAINS, AI_COLOR } from "../theme";
 import { useTheme } from "../hooks/useTheme";
+import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 import FocusMeter from "../components/FocusRing";
 import DraggableList from "../components/DraggableList";
 import AiTaskComposer from "../components/AiTaskComposer";
 import { ensureRemindersReady } from "../reminderSync";
-import { formatClock12 } from "../formatTime";
+import { formatClock12, formatIsoClock12 } from "../formatTime";
 
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DOUBLE_TAP_MS = 350;
 
 export default function TodayScreen({ navigation }) {
   const dispatch = useDispatch();
-  const { data, loading, error } = useSelector((s) => s.today);
+  const data = useSelector((s) => s.today.data);
+  const loading = useSelector((s) => s.today.loading);
+  const error = useSelector((s) => s.today.error);
+  const focusBlock = data?.focusBlock;
   const [remindersEnabled, setRemindersEnabled] = useState(true);
-  const appState = useRef(AppState.currentState);
   const { colors, domainMeta } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -34,28 +35,32 @@ export default function TodayScreen({ navigation }) {
     navigation.setOptions({ title: `Today: ${WEEKDAY_NAMES[data.weekday]}` });
   }, [navigation, data?.weekday]);
 
-  // A day rolls over while the app sits open or backgrounded overnight.
-  // Re-pulling from the server (source of truth for "today") on focus,
-  // foreground, and a slow timer picks that up without touching device clocks.
-  useFocusEffect(
-    useCallback(() => {
-      dispatch(fetchToday());
-    }, [dispatch])
+  const refreshToday = useCallback(() => dispatch(fetchToday()), [dispatch]);
+  useStaleFocusRefresh(refreshToday, 45000);
+
+  const onReorder = useCallback((order) => dispatch(reorderItems(order)), [dispatch]);
+  const keyExtractor = useCallback((item) => item._id, []);
+
+  const renderItem = useCallback(
+    ({ item, isDragging, dragHandleProps }) => (
+      <ItemCard
+        item={item}
+        isDragging={isDragging}
+        dragHandleProps={dragHandleProps}
+        styles={styles}
+        domainMeta={domainMeta}
+      />
+    ),
+    [styles, domainMeta]
   );
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextState) => {
-      if (appState.current.match(/inactive|background/) && nextState === "active") {
-        dispatch(fetchToday());
-      }
-      appState.current = nextState;
-    });
-    const interval = setInterval(() => dispatch(fetchToday()), REFRESH_INTERVAL_MS);
-    return () => {
-      subscription.remove();
-      clearInterval(interval);
-    };
-  }, [dispatch]);
+  const focusStats = useMemo(() => {
+    if (!data?.items) return { focusPct: 0, focusDone: 0, focusTotal: 0 };
+    const focusItems = data.items.filter((i) => FOCUS_DOMAINS.includes(i.domain));
+    const focusDone = focusItems.filter((i) => i.status === "done").length;
+    const focusPct = focusItems.length ? Math.round((focusDone / focusItems.length) * 100) : 0;
+    return { focusPct, focusDone, focusTotal: focusItems.length };
+  }, [data?.items]);
 
   if (loading && !data) {
     return (
@@ -64,7 +69,7 @@ export default function TodayScreen({ navigation }) {
       </View>
     );
   }
-  if (error) {
+  if (error && !data) {
     return (
       <View style={styles.center}>
         <Text style={styles.error}>{error}</Text>
@@ -73,17 +78,14 @@ export default function TodayScreen({ navigation }) {
   }
   if (!data) return null;
 
-  // "The 4" ring still tracks just the core priorities, even though every
-  // item — core or not — now lives in one single chronological timeline
-  // below instead of being split into a separate hidden section.
-  const focusItems = data.items.filter((i) => FOCUS_DOMAINS.includes(i.domain));
-  const focusDone = focusItems.filter((i) => i.status === "done").length;
-  const focusPct = focusItems.length ? Math.round((focusDone / focusItems.length) * 100) : 0;
-
   return (
-    <ScrollView style={styles.page} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+    <ScrollView
+      style={styles.page}
+      contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+      removeClippedSubviews
+    >
       <View style={styles.hero}>
-        <FocusMeter pct={focusPct} label={`${focusDone}/${focusItems.length} of the 4`} />
+        <FocusMeter pct={focusStats.focusPct} label={`${focusStats.focusDone}/${focusStats.focusTotal} of the 4`} />
         <View style={styles.heroBody}>
           <Text style={styles.heroKicker}>{data.next ? "Do this next" : "Focus"}</Text>
           <Text style={styles.heroTitle} numberOfLines={2}>
@@ -111,6 +113,22 @@ export default function TodayScreen({ navigation }) {
         <Text style={styles.editScheduleBtnHint}>Adjust times · add extras for today</Text>
       </Pressable>
       <AiTaskComposer />
+      {focusBlock?.active ? (
+        <View style={styles.focusChip}>
+          <View style={styles.focusChipCopy}>
+            <Text style={styles.focusChipTitle}>Silent until {formatIsoClock12(focusBlock.until)}</Text>
+            <Text style={styles.focusChipHint}>
+              {focusBlock.reason ? `${focusBlock.reason} · ` : ""}alarms come back slot by slot
+            </Text>
+          </View>
+          <Pressable style={styles.focusChipGhost} onPress={() => dispatch(extendFocus({ minutes: 30 }))}>
+            <Text style={styles.focusChipGhostText}>+30 min</Text>
+          </Pressable>
+          <Pressable style={styles.focusChipPrimary} onPress={() => dispatch(resumeFocus())}>
+            <Text style={styles.focusChipPrimaryText}>I'm back</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       <Text style={styles.sectionLabel}>Today, in order</Text>
       <Text style={styles.dragHint}>
@@ -118,66 +136,60 @@ export default function TodayScreen({ navigation }) {
       </Text>
       <DraggableList
         items={data.items}
-        keyExtractor={(item) => item._id}
-        onReorder={(order) => dispatch(reorderItems(order))}
-        renderItem={({ item, isDragging, dragHandleProps }) => (
-          <ItemCard
-            item={item}
-            dispatch={dispatch}
-            isDragging={isDragging}
-            dragHandleProps={dragHandleProps}
-            styles={styles}
-            domainMeta={domainMeta}
-          />
-        )}
+        keyExtractor={keyExtractor}
+        onReorder={onReorder}
+        renderItem={renderItem}
       />
     </ScrollView>
   );
 }
 
-function ItemCard({ item, dispatch, isDragging, dragHandleProps, styles, domainMeta }) {
+const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, styles, domainMeta }) {
+  const dispatch = useDispatch();
   const meta = domainMeta(item.domain);
   const isOptional = item.alertLevel === "info";
+  const isAi = item.source === "ai" || item.carryForward;
   const lastTapRef = useRef(0);
 
-  function onStepPress(step) {
-    const now = Date.now();
-    const isDoubleTap = now - lastTapRef.current < DOUBLE_TAP_MS;
-    lastTapRef.current = now;
-    // Double-tapping any step on an already done/skipped item is the
-    // shortcut for "undo everything" — no need to first uncheck every step
-    // by hand and then separately hit the Undo button below.
-    if (isDoubleTap && item.status !== "pending") {
-      lastTapRef.current = 0;
-      dispatch(undoItem(item._id));
-      return;
-    }
-    dispatch(toggleStep({ itemId: item._id, stepKey: step.key }));
-  }
+  const onStepPress = useCallback(
+    (step) => {
+      const now = Date.now();
+      const isDoubleTap = now - lastTapRef.current < DOUBLE_TAP_MS;
+      lastTapRef.current = now;
+      if (isDoubleTap && item.status !== "pending") {
+        lastTapRef.current = 0;
+        dispatch(undoItem(item._id));
+        return;
+      }
+      dispatch(toggleStep({ itemId: item._id, stepKey: step.key }));
+    },
+    [dispatch, item._id, item.status]
+  );
 
   return (
     <View
       style={[
         styles.card,
-        { borderLeftColor: meta.color },
+        { borderLeftColor: isAi ? AI_COLOR : meta.color },
         isOptional && styles.cardOptional,
+        isAi && styles.cardAi,
         item.status !== "pending" && styles.faded,
         isDragging && styles.cardDragging,
       ]}
     >
       <View style={styles.cardHeadRow}>
         <View style={styles.badgeRow}>
-          <View style={[styles.badge, { backgroundColor: meta.color + "29" }]}>
-            <Text style={[styles.badgeText, { color: meta.color }]}>{meta.label}</Text>
+          <View style={[styles.badge, { backgroundColor: (isAi ? AI_COLOR : meta.color) + "29" }]}>
+            <Text style={[styles.badgeText, { color: isAi ? AI_COLOR : meta.color }]}>{meta.label}</Text>
           </View>
           {isOptional ? (
             <View style={styles.optionalBadge}>
               <Text style={styles.optionalBadgeText}>Optional</Text>
             </View>
           ) : null}
-          {item.carryForward || item.source === "ai" ? (
+          {isAi ? (
             <View style={styles.queueBadge}>
-              <Text style={styles.queueBadgeText}>Until done</Text>
+              <Text style={styles.queueBadgeText}>AI</Text>
             </View>
           ) : null}
           {item.locked || item.key === "tomorrow-prep" ? (
@@ -223,7 +235,7 @@ function ItemCard({ item, dispatch, isDragging, dragHandleProps, styles, domainM
       )}
     </View>
   );
-}
+});
 
 function createStyles(colors) {
   return StyleSheet.create({
@@ -261,6 +273,25 @@ function createStyles(colors) {
     editScheduleBtnText: { color: colors.gold, fontSize: 14, fontWeight: "700", marginBottom: 2 },
     editScheduleBtnHint: { color: colors.muted2, fontSize: 11.5 },
 
+    focusChip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      backgroundColor: "rgba(109,140,255,0.10)",
+      borderWidth: 1,
+      borderColor: "rgba(109,140,255,0.45)",
+      borderRadius: 14,
+      padding: 14,
+      marginBottom: 18,
+    },
+    focusChipCopy: { flex: 1 },
+    focusChipTitle: { color: "#6d8cff", fontSize: 14, fontWeight: "700", marginBottom: 2 },
+    focusChipHint: { color: colors.muted2, fontSize: 11.5 },
+    focusChipGhost: { paddingVertical: 8, paddingHorizontal: 8 },
+    focusChipGhostText: { color: "#6d8cff", fontWeight: "700", fontSize: 12 },
+    focusChipPrimary: { backgroundColor: "#6d8cff", borderRadius: 9, paddingVertical: 8, paddingHorizontal: 12 },
+    focusChipPrimaryText: { color: "#0a0b12", fontWeight: "800", fontSize: 12 },
+
     sectionLabel: { color: colors.muted2, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 4 },
     dragHint: { color: colors.muted2, fontSize: 10.5, fontStyle: "italic", marginBottom: 10 },
 
@@ -274,6 +305,10 @@ function createStyles(colors) {
       marginBottom: 12,
     },
     cardOptional: { borderStyle: "dashed", backgroundColor: colors.bgSoft },
+    cardAi: {
+      backgroundColor: "rgba(109,140,255,0.10)",
+      borderColor: "rgba(109,140,255,0.45)",
+    },
     cardDragging: { borderColor: colors.gold, shadowColor: "#000", shadowOpacity: 0.35, shadowRadius: 12, shadowOffset: { width: 0, height: 6 } },
     faded: { opacity: 0.5 },
     cardHeadRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },

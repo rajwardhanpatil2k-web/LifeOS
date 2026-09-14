@@ -47,6 +47,15 @@ export const addTodayItem = createAsyncThunk("today/addItem", async (payload) =>
 export const addVoiceTask = createAsyncThunk("today/voiceTask", async (transcript) =>
   api("/api/tasks/voice", { method: "POST", body: JSON.stringify({ transcript }) })
 );
+export const pauseFocus = createAsyncThunk("today/pauseFocus", async ({ durationMin, reason, until } = {}) =>
+  api("/api/focus/pause", { method: "POST", body: JSON.stringify({ durationMin, reason, until }) })
+);
+export const resumeFocus = createAsyncThunk("today/resumeFocus", async () =>
+  api("/api/focus/resume", { method: "POST", body: "{}" })
+);
+export const extendFocus = createAsyncThunk("today/extendFocus", async ({ minutes = 30 } = {}) =>
+  api("/api/focus/extend", { method: "POST", body: JSON.stringify({ minutes }) })
+);
 export const removeTodayItem = createAsyncThunk("today/removeItem", async (itemId) =>
   api(`/api/items/${itemId}`, { method: "DELETE", body: "{}" })
 );
@@ -87,6 +96,7 @@ function applyScheduleUpdate(state, action) {
   state.data.items = action.payload.items;
   state.data.score = action.payload.score;
   state.data.next = action.payload.next;
+  if ("focusBlock" in action.payload) state.data.focusBlock = action.payload.focusBlock;
 }
 
 // The day-detail screen can also mark today's items done/skipped/undone —
@@ -112,7 +122,7 @@ const todaySlice = createSlice({
   extraReducers: (builder) => {
     builder
       .addCase(fetchToday.pending, (state) => {
-        state.loading = true;
+        if (!state.data) state.loading = true;
         state.error = null;
       })
       .addCase(fetchToday.fulfilled, (state, action) => {
@@ -142,6 +152,9 @@ const todaySlice = createSlice({
       .addCase(updateItemSchedule.fulfilled, applyScheduleUpdate)
       .addCase(addTodayItem.fulfilled, applyScheduleUpdate)
       .addCase(addVoiceTask.fulfilled, applyScheduleUpdate)
+      .addCase(pauseFocus.fulfilled, applyScheduleUpdate)
+      .addCase(resumeFocus.fulfilled, applyScheduleUpdate)
+      .addCase(extendFocus.fulfilled, applyScheduleUpdate)
       .addCase(removeTodayItem.fulfilled, applyScheduleUpdate)
       .addCase(updateSettings.fulfilled, (state, action) => {
         // A wake-time change reschedules today's still-pending items too.
@@ -203,7 +216,7 @@ const settingsSlice = createSlice({
   extraReducers: (builder) => {
     builder
       .addCase(fetchSettings.pending, (state) => {
-        state.loading = true;
+        if (!state.hydrated) state.loading = true;
         state.error = null;
       })
       .addCase(fetchSettings.fulfilled, (state, action) => {
@@ -280,7 +293,7 @@ const insightsSlice = createSlice({
   extraReducers: (builder) => {
     builder
       .addCase(fetchInsights.pending, (state) => {
-        state.loading = true;
+        if (!state.stats) state.loading = true;
         state.error = null;
       })
       .addCase(fetchInsights.fulfilled, (state, action) => {
@@ -293,7 +306,7 @@ const insightsSlice = createSlice({
         state.error = action.error.message;
       })
       .addCase(fetchInsightReport.pending, (state) => {
-        state.reportLoading = true;
+        if (!state.report) state.reportLoading = true;
         state.reportError = null;
       })
       .addCase(fetchInsightReport.fulfilled, (state, action) => {

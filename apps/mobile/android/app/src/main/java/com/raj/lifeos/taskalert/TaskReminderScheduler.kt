@@ -13,11 +13,12 @@ object TaskReminderScheduler {
   private const val KEY_REMINDERS = "reminders"
   private const val KEY_OVERRIDES = "overrides"
   private const val KEY_ENABLED = "enabled"
+  private const val KEY_PAUSED_UNTIL = "paused_until"
   private const val REQUEST_BASE = 0x5B000000
   const val START_SNOOZE_MS = 5 * 60 * 1000L
   const val END_FOLLOWUP_MS = 15 * 60 * 1000L
-  const val CALL_GAP_MS = 2 * 60 * 1000L
-  const val QUEUE_RELEASE_MS = 8_000L
+  const val CALL_GAP_MS = 5 * 60 * 1000L
+  const val QUEUE_RELEASE_MS = 5 * 60 * 1000L
 
   data class Reminder(
     val id: String,
@@ -29,6 +30,26 @@ object TaskReminderScheduler {
     val durationMin: Int,
     val domain: String
   )
+
+  fun pausedUntil(context: Context): Long =
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_PAUSED_UNTIL, 0L)
+
+  fun setPausedUntil(context: Context, untilMs: Long) {
+    val now = System.currentTimeMillis()
+    val until = if (untilMs > now) untilMs else 0L
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+      .putLong(KEY_PAUSED_UNTIL, until)
+      .apply()
+    TaskAlertService.stop(context)
+    TaskCallQueue.clear(context)
+    if (until <= 0L) return
+    cancelArmed(context)
+    val kept = load(context).filter { it.at >= until && it.at > now + 1_000L }
+    save(context, kept)
+    val overrides = loadOverrides(context).filter { it.at >= until && it.at > now + 1_000L }
+    saveOverrides(context, overrides)
+    for (reminder in kept) arm(context, reminder)
+  }
 
   fun setEnabled(context: Context, enabled: Boolean) {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -42,17 +63,27 @@ object TaskReminderScheduler {
 
   fun replaceAll(context: Context, planned: List<Reminder>) {
     if (!isEnabled(context)) return
+    TaskCallQueue.clear(context)
     cancelArmed(context)
     val now = System.currentTimeMillis()
-    val overrides = loadOverrides(context).filter { it.at > now + 1_000L }
+    val pause = pausedUntil(context)
+    val previous = load(context)
+    val overrides = loadOverrides(context).filter { it.at > now + 1_000L && (pause <= now || it.at >= pause) }
     val plannedIds = planned.map { it.id }.toSet()
     val keptOverrides = overrides.filter { plannedIds.contains(it.id) }
     saveOverrides(context, keptOverrides)
 
     val merged = planned.map { reminder ->
       val override = keptOverrides.find { it.id == reminder.id && it.phase == reminder.phase }
-      if (override != null && override.at > reminder.at) reminder.copy(at = override.at) else reminder
-    }.filter { it.at > now + 1_000L }
+      var at = reminder.at
+      if (override != null && override.at > at) at = override.at
+      val prev = previous.find { it.id == reminder.id && it.phase == reminder.phase }
+      if (prev != null && prev.at > now + 1_000L && at > now + 1_000L) {
+        val bothSoon = prev.at - now < 15 * 60 * 1000L && at - now < 15 * 60 * 1000L
+        if (bothSoon) at = kotlin.math.min(prev.at, at)
+      }
+      reminder.copy(at = at)
+    }.filter { it.at > now + 1_000L && (pause <= now || it.at >= pause) }
 
     save(context, merged)
     for (reminder in merged) arm(context, reminder)
@@ -62,7 +93,9 @@ object TaskReminderScheduler {
     if (!isEnabled(context)) return
     if (reminder.id.isBlank() || reminder.title.isBlank()) return
     val now = System.currentTimeMillis()
+    val pause = pausedUntil(context)
     if (reminder.at <= now + 1_000L) return
+    if (pause > now && reminder.at < pause) return
 
     val reminders = load(context).filter { it.id != reminder.id }.toMutableList()
     reminders.add(reminder)
@@ -88,8 +121,11 @@ object TaskReminderScheduler {
 
   fun snooze(context: Context, base: Reminder, delayMs: Long) {
     if (!isEnabled(context) || base.id.isBlank()) return
-    val desired = System.currentTimeMillis() + delayMs.coerceAtLeast(3_000L)
-    val at = nextFreeAt(context, desired, base.id)
+    val now = System.currentTimeMillis()
+    val pause = pausedUntil(context)
+    val desired = now + delayMs.coerceAtLeast(3_000L)
+    val gated = if (pause > now) maxOf(desired, pause) else desired
+    val at = nextFreeAt(context, gated, base.id)
     val reminder = base.copy(at = at)
     val overrides = loadOverrides(context).filter { it.id != reminder.id }.toMutableList()
     overrides.add(reminder)
@@ -122,10 +158,11 @@ object TaskReminderScheduler {
   fun restore(context: Context) {
     if (!isEnabled(context)) return
     val now = System.currentTimeMillis()
-    val future = load(context).filter { it.at > now + 1_000L }
+    val pause = pausedUntil(context)
+    val future = load(context).filter { it.at > now + 1_000L && (pause <= now || it.at >= pause) }
     save(context, future)
     for (reminder in future) arm(context, reminder)
-    if (!TaskCallState.ringing) TaskCallQueue.releaseNext(context)
+    if (!TaskCallState.busy()) TaskCallQueue.parkAll(context, QUEUE_RELEASE_MS)
   }
 
   private fun cancelArmed(context: Context) {
@@ -136,6 +173,8 @@ object TaskReminderScheduler {
   }
 
   private fun arm(context: Context, reminder: Reminder) {
+    val pause = pausedUntil(context)
+    if (pause > System.currentTimeMillis() && reminder.at < pause) return
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val op = operation(context, reminder)
     try {

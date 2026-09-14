@@ -1,10 +1,10 @@
 import { useCallback, useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
 import { useDispatch, useSelector } from "react-redux";
 import { fetchWeek } from "../store";
 import { FOCUS_DOMAINS } from "../theme";
 import { useTheme } from "../hooks/useTheme";
+import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 
 const NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -14,12 +14,8 @@ export default function WeekScreen({ navigation }) {
   const { colors, domainMeta } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  // Refetch on every focus so switching tabs after midnight shows the new day.
-  useFocusEffect(
-    useCallback(() => {
-      dispatch(fetchWeek());
-    }, [dispatch])
-  );
+  const refreshWeek = useCallback(() => dispatch(fetchWeek()), [dispatch]);
+  useStaleFocusRefresh(refreshWeek, 120000, Boolean(week?.days?.length));
 
   return (
     <ScrollView style={styles.page} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>

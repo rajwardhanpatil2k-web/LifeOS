@@ -12,9 +12,17 @@ export function isTaskAlertsAvailable() {
   return available;
 }
 
-export async function syncTaskAlerts(items, { voiceAlerts = true, name = "Raj" } = {}) {
+export async function setTaskAlertsPausedUntil(untilMs) {
+  if (!available || !TaskReminderModule.setPausedUntil) return false;
+  return TaskReminderModule.setPausedUntil(Number(untilMs) || 0);
+}
+
+export async function syncTaskAlerts(items, { voiceAlerts = true, name = "Raj", pausedUntil = 0 } = {}) {
   if (!available) return false;
   await TaskReminderModule.setEnabled(true);
+  if (TaskReminderModule.setPausedUntil) {
+    await TaskReminderModule.setPausedUntil(Number(pausedUntil) > Date.now() ? Number(pausedUntil) : 0);
+  }
 
   if (!Array.isArray(items) || items.length === 0) {
     if (TaskReminderModule.replaceTaskCalls) await TaskReminderModule.replaceTaskCalls([]);
@@ -22,7 +30,7 @@ export async function syncTaskAlerts(items, { voiceAlerts = true, name = "Raj" }
     return true;
   }
 
-  const planned = planTaskCalls(items, { voiceAlerts: voiceAlerts !== false, name });
+  const planned = planTaskCalls(items, { voiceAlerts: voiceAlerts !== false, name, pausedUntil });
 
   if (TaskReminderModule.replaceTaskCalls) {
     await TaskReminderModule.replaceTaskCalls(planned);
@@ -118,7 +126,23 @@ export async function setTaskCallUiVisible(visible) {
 
 export async function speakTaskPrompt(text) {
   if (!available || !TaskReminderModule.speakPrompt || !text) return false;
-  return TaskReminderModule.speakPrompt(String(text));
+  const spoken = TaskReminderModule.speakPrompt(String(text)).catch(() => false);
+  const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000));
+  const result = await Promise.race([spoken, timeout]);
+  if (result === "timeout") await cancelSpeakPrompt().catch(() => {});
+  return true;
+}
+
+export async function cancelSpeakPrompt() {
+  if (!available) return false;
+  if (TaskReminderModule.cancelSpeak) return TaskReminderModule.cancelSpeak();
+  return true;
+}
+
+export async function silenceTaskAlert() {
+  if (!available) return false;
+  if (TaskReminderModule.silenceAlert) return TaskReminderModule.silenceAlert();
+  return TaskReminderModule.stopAlert();
 }
 
 export async function stopTaskAlert() {

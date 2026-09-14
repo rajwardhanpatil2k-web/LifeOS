@@ -149,8 +149,21 @@ async function setCarryForwardStatus(user, item, status) {
   await CarryForwardTask.updateOne({ userId: user._id, originKey }, { status });
 }
 
-async function createVoiceTask(user, plan, transcript) {
-  const parsed = await parseVoiceTask(transcript);
+async function createVoiceTask(user, plan, transcript, parsedInput) {
+  const parsed = parsedInput?.title
+    ? {
+        title: parsedInput.title,
+        scheduledAt: TIME_RE.test(parsedInput.scheduledAt)
+          ? parsedInput.scheduledAt
+          : (await parseVoiceTask(transcript)).scheduledAt,
+        durationMin:
+          Number.isFinite(parsedInput.durationMin) && parsedInput.durationMin > 0
+            ? Math.round(parsedInput.durationMin)
+            : 30,
+        domain: DOMAINS.includes(parsedInput.domain) ? parsedInput.domain : "ops",
+        step: String(parsedInput.step || parsedInput.title).trim() || parsedInput.title,
+      }
+    : await parseVoiceTask(transcript);
   const originKey = `ai-${Date.now()}`;
   const steps = [{ key: "main", label: parsed.step, done: false }];
   await CarryForwardTask.create({

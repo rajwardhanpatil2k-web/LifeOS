@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useDispatch, useSelector } from "react-redux";
-import { fetchSettings, updateSettings } from "../store";
+import { fetchSettings, fetchToday, updateSettings } from "../store";
 import { useTheme } from "../hooks/useTheme";
 import TimeStepper from "../components/TimeStepper";
 import {
@@ -15,10 +14,16 @@ import {
 } from "../wakeAlarm";
 import { isVoiceAgentAvailable, speakNow, previewCue } from "../voiceAgent";
 import { isTaskAlertsAvailable, testTaskAlert } from "../taskAlerts";
+import { getApiUrl, saveApiUrl } from "../apiConfig";
+import { testApiConnection } from "../api";
+import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 
 export default function SettingsScreen({ navigation }) {
   const dispatch = useDispatch();
-  const { wakeTarget, homeTarget, prepTarget, themeMode, voiceAlerts, name, loading, saving, error } = useSelector((s) => s.settings);
+  const { wakeTarget, homeTarget, prepTarget, themeMode, voiceAlerts, name, loading, saving, error } = useSelector(
+    (s) => s.settings
+  );
+  const nativeChecked = useRef(false);
   const todayItems = useSelector((s) => s.today.data?.items);
   const [wakeDraft, setWakeDraft] = useState(wakeTarget);
   const [homeDraft, setHomeDraft] = useState(homeTarget);
@@ -27,24 +32,30 @@ export default function SettingsScreen({ navigation }) {
   const [nextAlarm, setNextAlarm] = useState(null);
   const [exactAlarms, setExactAlarms] = useState(true);
   const [wheelActive, setWheelActive] = useState(false);
+  const [serverUrl, setServerUrl] = useState(getApiUrl());
+  const [serverSaved, setServerSaved] = useState(false);
+  const [serverSaving, setServerSaving] = useState(false);
+  const [serverError, setServerError] = useState("");
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  useFocusEffect(
-    useCallback(() => {
-      dispatch(fetchSettings());
-      if (isWakeAlarmAvailable()) {
-        getAlarmInfo()
-          .then((info) => setNextAlarm(formatAlarmInfo(info)))
-          .catch(() => setNextAlarm(null));
-      }
-      if (isWakeAlarmAvailable() || isTaskAlertsAvailable()) {
-        canScheduleExactAlarms()
-          .then(setExactAlarms)
-          .catch(() => setExactAlarms(true));
-      }
-    }, [dispatch])
-  );
+  const refreshSettings = useCallback(async () => {
+    await dispatch(fetchSettings());
+    if (nativeChecked.current) return;
+    nativeChecked.current = true;
+    if (isWakeAlarmAvailable()) {
+      getAlarmInfo()
+        .then((info) => setNextAlarm(formatAlarmInfo(info)))
+        .catch(() => setNextAlarm(null));
+    }
+    if (isWakeAlarmAvailable() || isTaskAlertsAvailable()) {
+      canScheduleExactAlarms()
+        .then(setExactAlarms)
+        .catch(() => setExactAlarms(true));
+    }
+  }, [dispatch]);
+
+  useStaleFocusRefresh(refreshSettings, 120000);
 
   useEffect(() => {
     setWakeDraft(wakeTarget);
@@ -230,6 +241,52 @@ export default function SettingsScreen({ navigation }) {
         </Text>
         {nextAlarm ? <Text style={styles.link}>Armed for {nextAlarm}</Text> : null}
       </Pressable>
+
+      <Text style={styles.sectionLabel}>Server</Text>
+      <View style={styles.card}>
+        <Text style={styles.hint}>
+          Your Render backend URL. It must return JSON from /health — not a random website. Yours is
+          https://lifeos-1vvx.onrender.com
+        </Text>
+        <Text style={styles.addTimeLabel}>Current: {getApiUrl()}</Text>
+        <TextInput
+          style={styles.input}
+          value={serverUrl}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          placeholder="https://lifeos-1vvx.onrender.com"
+          placeholderTextColor={colors.muted2}
+          onChangeText={(value) => {
+            setServerUrl(value);
+            setServerError("");
+          }}
+        />
+        <Pressable
+          style={[styles.saveBtn, (serverSaving || !serverUrl.trim()) && styles.saveBtnDisabled]}
+          disabled={serverSaving || !serverUrl.trim()}
+          onPress={async () => {
+            setServerSaving(true);
+            setServerSaved(false);
+            setServerError("");
+            try {
+              await testApiConnection(serverUrl);
+              await saveApiUrl(serverUrl);
+              await Promise.all([dispatch(fetchSettings()), dispatch(fetchToday())]);
+              setServerSaved(true);
+              setTimeout(() => setServerSaved(false), 2500);
+            } catch (err) {
+              setServerError(err.message || "Could not reach Life OS API.");
+            } finally {
+              setServerSaving(false);
+            }
+          }}
+        >
+          <Text style={styles.saveBtnText}>{serverSaving ? "Testing…" : "Test & save server"}</Text>
+        </Pressable>
+        {serverSaved ? <Text style={styles.saved}>Connected — using {getApiUrl()}.</Text> : null}
+        {serverError ? <Text style={styles.error}>{serverError}</Text> : null}
+      </View>
     </ScrollView>
   );
 }
@@ -256,6 +313,16 @@ function createStyles(colors) {
     saved: { color: colors.success, fontSize: 12.5, textAlign: "center", marginTop: 12, marginBottom: 12 },
     error: { color: colors.danger, fontSize: 12.5, textAlign: "center", marginTop: 12 },
     link: { color: colors.gold, fontSize: 13, fontWeight: "700" },
+    input: {
+      borderWidth: 1,
+      borderColor: colors.line,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      color: colors.text,
+      fontSize: 14,
+      marginBottom: 14,
+    },
 
     modeToggle: { flexDirection: "row", gap: 10 },
     modeBtn: {

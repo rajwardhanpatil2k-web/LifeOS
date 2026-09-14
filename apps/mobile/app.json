@@ -2,7 +2,7 @@
   "expo": {
     "name": "Life OS",
     "slug": "life-os",
-    "version": "0.2.0",
+    "version": "0.2.3",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "scheme": "lifeos",
@@ -20,7 +20,7 @@
     },
     "ios": { "supportsTablet": false, "bundleIdentifier": "com.raj.lifeos" },
     "extra": {
-      "apiUrl": "https://lifeos-raj.onrender.com"
+      "apiUrl": "https://lifeos-1vvx.onrender.com"
     },
     "android": {
       "package": "com.raj.lifeos",

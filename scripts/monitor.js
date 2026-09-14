@@ -99,7 +99,23 @@ async function main() {
   if (ok) {
     console.log("API healthy: http://127.0.0.1:4000");
     console.log("Today board: http://127.0.0.1:4000");
-    console.log("Mobile: npm run dev:mobile");
+    const ip = require("os").networkInterfaces();
+    let lan = "";
+    for (const list of Object.values(ip)) {
+      for (const addr of list || []) {
+        if (addr.family === "IPv4" && !addr.internal) {
+          lan = addr.address;
+          break;
+        }
+      }
+      if (lan) break;
+    }
+    console.log("Mobile (simulator): npm run dev:mobile");
+    if (lan) {
+      console.log(`Mobile (phone on Wi-Fi): npm run dev:phone  → API http://${lan}:4000`);
+    } else {
+      console.log("Mobile (phone on Wi-Fi): npm run dev:phone");
+    }
   } else {
     console.log("API not healthy yet. Check Mongo on 27017.");
   }

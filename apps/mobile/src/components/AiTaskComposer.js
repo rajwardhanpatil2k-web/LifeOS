@@ -44,12 +44,12 @@ export default function AiTaskComposer() {
       setError("");
       try {
         const result = await dispatch(addVoiceTask(text)).unwrap();
-        setPreview(result.parsed || result.item);
-        setPhase("done");
+        setPreview(result.preview || result.parsed || result.item);
+        setPhase(result.intent || "done");
         setTimeout(close, 1400);
       } catch (err) {
         adding.current = false;
-        setError(err.message || "Could not add that task.");
+        setError(err.message || "I couldn't do that.");
         setPhase("error");
       }
     },
@@ -94,31 +94,41 @@ export default function AiTaskComposer() {
       <Pressable style={styles.launch} onPress={() => setOpen(true)}>
         <Ionicons name="sparkles" size={16} color={AI_COLOR} />
         <View style={styles.launchCopy}>
-          <Text style={styles.launchTitle}>Ask AI to add a task</Text>
-          <Text style={styles.launchHint}>Say it — “laundry around 8 PM” — it stays queued until done</Text>
+          <Text style={styles.launchTitle}>Ask AI</Text>
+          <Text style={styles.launchHint}>Add a task, pause alarms, or remind me later</Text>
         </View>
       </Pressable>
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
         <View style={styles.backdrop}>
           <View style={styles.sheet}>
-            <Text style={styles.sheetKicker}>AI TASK</Text>
+            <Text style={styles.sheetKicker}>AI</Text>
             <Text style={styles.sheetTitle}>
               {phase === "listening"
                 ? "Listening…"
                 : phase === "saving"
-                  ? "Planning it…"
-                  : phase === "done"
-                    ? "Added for today"
-                    : "What should I add?"}
+                  ? "On it…"
+                  : phase === "pause_focus" || phase === "extend_focus"
+                    ? "Alarms paused"
+                    : phase === "resume_focus"
+                      ? "Alarms back on"
+                      : phase === "defer_task"
+                        ? "I'll alert you"
+                        : phase === "add_task" || phase === "done"
+                          ? "Added for today"
+                          : "What should I do?"}
             </Text>
             <Text style={styles.sheetHint}>
-              Speak the task and when. If you don’t finish it, I’ll put it back tomorrow at the same time.
+              Add a task, pause alarms while you’re out, or say “alert me after 30 minutes.” Missed slots come back one at a time.
             </Text>
             {heard ? <Text style={styles.heard}>“{heard}”</Text> : null}
             {preview ? (
               <Text style={styles.preview}>
-                {preview.title} · {formatClock12(preview.scheduledAt)}
+                {preview.title}
+                {preview.reason ? ` · ${preview.reason}` : ""}
+                {!preview.reason && preview.scheduledAt && phase !== "pause_focus" && phase !== "extend_focus" && phase !== "resume_focus"
+                  ? ` · ${formatClock12(preview.scheduledAt)}`
+                  : ""}
               </Text>
             ) : null}
             {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -127,7 +137,7 @@ export default function AiTaskComposer() {
             {phase === "type" || phase === "error" ? (
               <TextInput
                 style={styles.input}
-                placeholder="Give clothes to laundry around 8 PM"
+                placeholder="Don't disturb me for an hour, or laundry around 8 PM"
                 placeholderTextColor={colors.muted2}
                 value={heard}
                 onChangeText={setHeard}
@@ -146,7 +156,7 @@ export default function AiTaskComposer() {
               ) : null}
               {phase === "type" || phase === "error" ? (
                 <Pressable style={styles.primary} onPress={() => submit(heard)}>
-                  <Text style={styles.primaryText}>Add task</Text>
+                  <Text style={styles.primaryText}>Send</Text>
                 </Pressable>
               ) : null}
             </View>

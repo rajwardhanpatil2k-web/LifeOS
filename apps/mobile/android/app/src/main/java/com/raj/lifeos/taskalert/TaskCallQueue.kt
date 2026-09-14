@@ -27,10 +27,19 @@ object TaskCallQueue {
     save(context, emptyList())
   }
 
+  fun parkAll(context: Context, delayMs: Long) {
+    val items = load(context)
+    clear(context)
+    if (items.isEmpty()) return
+    var at = System.currentTimeMillis() + delayMs.coerceAtLeast(3_000L)
+    for (item in items) {
+      TaskReminderScheduler.schedule(context, item.copy(at = at))
+      at += TaskReminderScheduler.CALL_GAP_MS
+    }
+  }
+
   fun releaseNext(context: Context) {
-    val next = pop(context) ?: return
-    val at = System.currentTimeMillis() + TaskReminderScheduler.QUEUE_RELEASE_MS
-    TaskReminderScheduler.schedule(context, next.copy(at = at))
+    parkAll(context, TaskReminderScheduler.QUEUE_RELEASE_MS)
   }
 
   private fun load(context: Context): List<TaskReminderScheduler.Reminder> {

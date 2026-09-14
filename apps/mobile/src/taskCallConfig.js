@@ -5,12 +5,14 @@ export const START_SNOOZE_MIN = 5;
 export const END_FOLLOWUP_MIN = 15;
 export const DEFAULT_DURATION_MIN = 15;
 export const UNANSWERED_RING_MS = 60_000;
-// Never ring two task calls inside this window.
-export const CALL_GAP_MS = 2 * 60 * 1000;
+// Never ring two task calls inside this window — overdue catch-up stays slot-by-slot.
+export const CALL_GAP_MS = 5 * 60 * 1000;
+// After hanging up, wait this long before the next overdue start-call.
+export const AFTER_CALL_COOLDOWN_MS = 2 * 60 * 1000;
 // Ask "did you finish?" this far before the next task's start, so they don't collide.
 export const END_CALL_LEAD_MS = 2 * 60 * 1000;
-// After one call ends, wait this long before releasing a queued call.
-export const QUEUE_RELEASE_MS = 8_000;
+// Native fallback only: if JS never replans, park queued calls this far out.
+export const QUEUE_RELEASE_MS = 5 * 60 * 1000;
 
 export function durationOf(item) {
   const n = Number(item?.durationMin);

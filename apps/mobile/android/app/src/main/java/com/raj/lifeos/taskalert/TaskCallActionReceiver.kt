@@ -21,11 +21,13 @@ class TaskCallActionReceiver : BroadcastReceiver() {
 
     when (intent.action) {
       ACTION_ANSWER -> {
-        TaskAlertService.stop(context)
+        TaskAlertService.silence(context)
+        TaskCallState.inSession = true
         TaskCallIntents.launchScreen(context, id, phase, title, alertLevel, durationMin, domain, pickedUp = true)
       }
       ACTION_REJECT -> {
         TaskAlertService.stop(context)
+        TaskCallQueue.parkAll(context, TaskReminderScheduler.QUEUE_RELEASE_MS)
         if (id.isNotBlank()) {
           val delay = if (phase == TaskCallState.PHASE_END) {
             TaskReminderScheduler.END_FOLLOWUP_MS

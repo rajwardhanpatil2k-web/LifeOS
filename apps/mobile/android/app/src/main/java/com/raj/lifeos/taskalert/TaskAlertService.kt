@@ -35,12 +35,17 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     const val CHANNEL_ID = "lifeos-task-call"
     const val NOTIFICATION_ID = 5211
     const val ACTION_STOP = "com.raj.lifeos.taskalert.STOP"
+    const val ACTION_SILENCE = "com.raj.lifeos.taskalert.SILENCE"
     const val ACTION_HIDE_NOTIFICATION = "com.raj.lifeos.taskalert.HIDE_NOTIFICATION"
     const val ACTION_SHOW_NOTIFICATION = "com.raj.lifeos.taskalert.SHOW_NOTIFICATION"
     const val UNANSWERED_MS = 60_000L
 
     fun stop(context: Context) {
       sendAction(context, ACTION_STOP)
+    }
+
+    fun silence(context: Context) {
+      sendAction(context, ACTION_SILENCE)
     }
 
     fun hideNotification(context: Context) {
@@ -82,8 +87,12 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP) {
-      finishAlert(clearState = true)
+      finishAlert(clearState = true, parkQueue = false)
       return START_NOT_STICKY
+    }
+    if (intent?.action == ACTION_SILENCE) {
+      silenceAudio()
+      return START_STICKY
     }
     if (intent?.action == ACTION_HIDE_NOTIFICATION) {
       dismissCallNotification()
@@ -158,8 +167,14 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
         .build()
     )
     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-      override fun onStart(utteranceId: String?) {}
-      override fun onDone(utteranceId: String?) {}
+      override fun onStart(utteranceId: String?) {
+        handler.post { stopRingtoneOnly() }
+      }
+      override fun onDone(utteranceId: String?) {
+        handler.post {
+          if (!finished && TaskCallState.ringing) startRingtone()
+        }
+      }
       @Deprecated("Deprecated in Java")
       override fun onError(utteranceId: String?) {}
       override fun onError(utteranceId: String?, errorCode: Int) {}
@@ -177,7 +192,7 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
       val utteranceId = "task-call-${System.currentTimeMillis()}"
       params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
       engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-    }, 900L)
+    }, 400L)
   }
 
   private fun startRingtone() {
@@ -244,10 +259,20 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
         delay
       )
     }
-    finishAlert(clearState = true)
+    finishAlert(clearState = true, parkQueue = true)
   }
 
-  private fun finishAlert(clearState: Boolean) {
+  private fun silenceAudio() {
+    unansweredRunnable?.let { handler.removeCallbacks(it) }
+    unansweredRunnable = null
+    stopRingtoneOnly()
+    try { vibrator?.cancel() } catch (_: Exception) {}
+    try { tts?.stop() } catch (_: Exception) {}
+    TaskCallState.ringing = false
+    dismissCallNotification()
+  }
+
+  private fun finishAlert(clearState: Boolean, parkQueue: Boolean = false) {
     if (finished) return
     finished = true
     handler.removeCallbacksAndMessages(null)
@@ -264,9 +289,10 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     } catch (_: Exception) {}
     wakeLock = null
     TaskCallState.ringing = false
+    if (parkQueue) TaskCallQueue.parkAll(this, TaskReminderScheduler.QUEUE_RELEASE_MS)
     if (clearState) TaskCallState.clear(this)
+    else TaskCallState.inSession = false
     dismissCallNotification()
-    TaskCallQueue.releaseNext(this)
     stopSelf()
   }
 
@@ -374,7 +400,7 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
   }
 
   override fun onDestroy() {
-    if (!finished) finishAlert(clearState = false)
+    if (!finished) finishAlert(clearState = false, parkQueue = false)
     super.onDestroy()
   }
 }

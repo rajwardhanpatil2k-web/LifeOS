@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../hooks/useTheme";
 
 const HOURS = Array.from({ length: 12 }, (_, i) => String(i + 1));
 const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
 const PERIODS = ["AM", "PM"];
-const LOOPS = 5;
+const LOOPS = 3;
 
 function parse(value) {
   const [h, m] = (value || "06:00").split(":").map(Number);
@@ -29,12 +29,22 @@ function to24(h12, period) {
   return h12 === 12 ? 12 : h12 + 12;
 }
 
-export default function TimeStepper({ value, onChange, label, compact = false, onScrollActive }) {
+function TimeStepper({ value, onChange, label, compact = false, onScrollActive }) {
   const { colors } = useTheme();
   const itemHeight = compact ? 26 : 36;
   const styles = useMemo(() => createStyles(colors, compact, itemHeight), [colors, compact, itemHeight]);
   const { h, m } = parse(value);
   const period = h >= 12 ? "PM" : "AM";
+
+  const onHourChange = useCallback(
+    (i) => onChange(format(to24(i + 1, period), m)),
+    [onChange, period, m]
+  );
+  const onMinuteChange = useCallback((i) => onChange(format(h, i)), [onChange, h]);
+  const onPeriodChange = useCallback(
+    (i) => onChange(format(to24(hour12(h), PERIODS[i]), m)),
+    [onChange, h, m]
+  );
 
   return (
     <View style={styles.wrap}>
@@ -46,7 +56,7 @@ export default function TimeStepper({ value, onChange, label, compact = false, o
           itemHeight={itemHeight}
           styles={styles}
           onScrollActive={onScrollActive}
-          onChange={(i) => onChange(format(to24(i + 1, period), m))}
+          onChange={onHourChange}
         />
         <Text style={styles.colon}>:</Text>
         <Wheel
@@ -55,7 +65,7 @@ export default function TimeStepper({ value, onChange, label, compact = false, o
           itemHeight={itemHeight}
           styles={styles}
           onScrollActive={onScrollActive}
-          onChange={(i) => onChange(format(h, i))}
+          onChange={onMinuteChange}
         />
         <Wheel
           items={PERIODS}
@@ -63,14 +73,16 @@ export default function TimeStepper({ value, onChange, label, compact = false, o
           itemHeight={itemHeight}
           styles={styles}
           onScrollActive={onScrollActive}
-          onChange={(i) => onChange(format(to24(hour12(h), PERIODS[i]), m))}
+          onChange={onPeriodChange}
         />
       </View>
     </View>
   );
 }
 
-function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
+export default memo(TimeStepper);
+
+const Wheel = memo(function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
   const ref = useRef(null);
   const count = items.length;
   const lastIndex = useRef(index);
@@ -83,12 +95,14 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
   }, [items]);
 
   const midLoop = Math.floor(LOOPS / 2);
+  const yFor = useCallback((i) => (midLoop * count + i) * itemHeight, [count, itemHeight]);
 
-  const yFor = (i) => (midLoop * count + i) * itemHeight;
-
-  const scrollToIndex = (i, animated) => {
-    ref.current?.scrollTo({ y: yFor(i), animated });
-  };
+  const scrollToIndex = useCallback(
+    (i, animated) => {
+      ref.current?.scrollTo({ y: yFor(i), animated });
+    },
+    [yFor]
+  );
 
   useEffect(() => {
     if (ignoreSync.current) {
@@ -98,27 +112,32 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
     }
     lastIndex.current = index;
     if (ready.current) scrollToIndex(index, false);
-  }, [index, itemHeight, count]);
+  }, [index, scrollToIndex]);
 
-  const emitFromY = (y) => {
-    const raw = Math.round(y / itemHeight);
-    const local = ((raw % count) + count) % count;
-    if (local !== lastIndex.current) {
-      lastIndex.current = local;
-      ignoreSync.current = true;
-      onChange(local);
-    }
-    return local;
-  };
+  const indexFromY = useCallback(
+    (y) => {
+      const raw = Math.round(y / itemHeight);
+      return ((raw % count) + count) % count;
+    },
+    [count, itemHeight]
+  );
 
-  const settle = (y) => {
-    const local = emitFromY(y);
-    const target = yFor(local);
-    if (Math.abs(y - target) > 1) {
-      ref.current?.scrollTo({ y: target, animated: false });
-    }
-    onScrollActive?.(false);
-  };
+  const settle = useCallback(
+    (y) => {
+      const local = indexFromY(y);
+      const target = yFor(local);
+      if (Math.abs(y - target) > 1) {
+        ref.current?.scrollTo({ y: target, animated: false });
+      }
+      if (local !== lastIndex.current) {
+        lastIndex.current = local;
+        ignoreSync.current = true;
+        onChange(local);
+      }
+      onScrollActive?.(false);
+    },
+    [indexFromY, onChange, onScrollActive, yFor]
+  );
 
   return (
     <View style={styles.col}>
@@ -127,11 +146,12 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
         <ScrollView
           ref={ref}
           nestedScrollEnabled
+          removeClippedSubviews
           showsVerticalScrollIndicator={false}
           snapToInterval={itemHeight}
           snapToAlignment="start"
           decelerationRate="fast"
-          scrollEventThrottle={16}
+          scrollEventThrottle={32}
           onLayout={() => {
             if (!ready.current) {
               ready.current = true;
@@ -139,7 +159,6 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
             }
           }}
           onScrollBeginDrag={() => onScrollActive?.(true)}
-          onScroll={(e) => emitFromY(e.nativeEvent.contentOffset.y)}
           onScrollEndDrag={(e) => {
             if (!e.nativeEvent.velocity || Math.abs(e.nativeEvent.velocity.y) < 0.05) {
               settle(e.nativeEvent.contentOffset.y);
@@ -150,7 +169,7 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
           <View style={{ height: itemHeight }} />
           {data.map((label, i) => (
             <View key={`${label}-${i}`} style={styles.wheelItem}>
-              <Text style={i % count === index ? styles.value : styles.valueMuted}>{label}</Text>
+              <Text style={styles.valueMuted}>{label}</Text>
             </View>
           ))}
           <View style={{ height: itemHeight }} />
@@ -158,7 +177,7 @@ function Wheel({ items, index, onChange, itemHeight, styles, onScrollActive }) {
       </View>
     </View>
   );
-}
+});
 
 function createStyles(colors, compact, itemHeight) {
   return StyleSheet.create({
@@ -187,15 +206,9 @@ function createStyles(colors, compact, itemHeight) {
       alignItems: "center",
       justifyContent: "center",
     },
-    value: {
-      color: colors.text,
-      fontSize: compact ? 18 : 28,
-      fontWeight: "800",
-      fontVariant: ["tabular-nums"],
-    },
     valueMuted: {
-      color: colors.muted2,
-      fontSize: compact ? 14 : 20,
+      color: colors.muted,
+      fontSize: compact ? 16 : 24,
       fontWeight: "700",
       fontVariant: ["tabular-nums"],
     },

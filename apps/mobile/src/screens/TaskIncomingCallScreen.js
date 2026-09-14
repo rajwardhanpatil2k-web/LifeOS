@@ -5,9 +5,11 @@ import { useDispatch, useSelector } from "react-redux";
 import { colors, domainMeta } from "../theme";
 import { completeItem, markItemReady, remindLaterItem, snoozeItem } from "../store";
 import {
+  cancelSpeakPrompt,
   clearTaskCallOverride,
   isTaskCallRinging,
   setTaskCallUiVisible,
+  silenceTaskAlert,
   snoozeTaskCall,
   speakTaskPrompt,
   startTaskCallListening,
@@ -21,7 +23,8 @@ import { resolveCallDelay } from "../taskCallPlanner";
 import {
   composeCompletePrompt,
   composeReadyPrompt,
-  interpretCallReply,
+  interpretCallReplies,
+  interpretDeferMinutes,
 } from "../voiceAgent";
 
 function truthyParam(value) {
@@ -34,6 +37,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   const itemId = params.itemId ? String(params.itemId) : "";
   const phase = params.phase === "end" ? "end" : "start";
   const todayItems = useSelector((s) => s.today.data?.items || []);
+  const focusPaused = useSelector((s) => !!s.today.data?.focusBlock?.active);
   const item = todayItems.find((row) => String(row._id) === itemId);
   const title = item?.title || params.title || "Task";
   const domain = item?.domain || params.domain || "";
@@ -47,20 +51,30 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   const [busy, setBusy] = useState(false);
   const [voicePhase, setVoicePhase] = useState("idle");
   const finished = useRef(false);
+  const sessionRef = useRef(0);
+  const promptRef = useRef("");
   const voicePhaseRef = useRef(voicePhase);
   voicePhaseRef.current = voicePhase;
   const listenTimer = useRef(null);
+  const listenTries = useRef(0);
   const stageRef = useRef(stage);
   const mountedAt = useRef(Date.now());
   stageRef.current = stage;
 
-  const leave = useCallback(() => {
+  const hangUp = useCallback(() => {
+    sessionRef.current += 1;
+    stopTaskCallListening().catch(() => {});
+    cancelSpeakPrompt().catch(() => {});
+    stopTaskAlert().catch(() => {});
+    setTaskCallUiVisible(false).catch(() => {});
+    setVoicePhase("idle");
     if (finished.current) return;
     finished.current = true;
-    stopTaskCallListening().catch(() => {});
-    stopTaskAlert().catch(() => {});
     if (navigation.canGoBack()) navigation.goBack();
+    else navigation.reset({ index: 0, routes: [{ name: "Main" }] });
   }, [navigation]);
+
+  const leave = hangUp;
 
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => true);
@@ -83,8 +97,15 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   }, []);
 
   useEffect(() => {
-    if (item && item.status !== "pending") leave();
-  }, [item, leave]);
+    if (!item) return;
+    if (item.status === "done" || item.status === "skipped") hangUp();
+  }, [item, hangUp]);
+
+  useEffect(() => {
+    if (!focusPaused || finished.current) return;
+    stopTaskAlert().catch(() => {});
+    leave();
+  }, [focusPaused, leave]);
 
   useEffect(() => {
     if (stage !== "ringing") return undefined;
@@ -92,6 +113,10 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       try {
         if (Date.now() - mountedAt.current < 2500) return;
         if (!(await isTaskCallRinging()) && !finished.current && stageRef.current === "ringing") {
+          if (focusPaused) {
+            leave();
+            return;
+          }
           if (!isPreview && itemId) {
             try {
               if (phase === "end") dispatch(remindLaterItem({ itemId, minutes: END_FOLLOWUP_MIN }));
@@ -107,7 +132,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       }
     }, 900);
     return () => clearInterval(interval);
-  }, [leave, stage]);
+  }, [leave, stage, focusPaused, dispatch, itemId, isPreview, phase]);
 
   useEffect(() => {
     return () => {
@@ -116,7 +141,8 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     };
   }, []);
 
-  const beginListening = useCallback(async () => {
+  const beginListening = useCallback(async (session) => {
+    if (finished.current || session !== sessionRef.current) return;
     setHeard("");
     try {
       await startTaskCallListening();
@@ -127,21 +153,25 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   useEffect(() => {
     if (stage !== "confirm") return undefined;
+    const session = sessionRef.current;
     let cancelled = false;
-    stopTaskAlert().catch(() => {});
     stopTaskCallListening().catch(() => {});
     const prompt = phase === "end" ? composeCompletePrompt({ title }) : composeReadyPrompt({ title });
+    promptRef.current = prompt;
     setHeard("");
+    listenTries.current = 0;
     setVoicePhase("speaking");
     (async () => {
+      await silenceTaskAlert().catch(() => {});
+      if (cancelled || finished.current || session !== sessionRef.current) return;
       await speakTaskPrompt(prompt).catch(() => {});
-      if (cancelled || finished.current) return;
+      if (cancelled || finished.current || session !== sessionRef.current) return;
       await new Promise((resolve) => {
-        listenTimer.current = setTimeout(resolve, 450);
+        listenTimer.current = setTimeout(resolve, 750);
       });
-      if (cancelled || finished.current) return;
+      if (cancelled || finished.current || session !== sessionRef.current) return;
       setVoicePhase("listening");
-      await beginListening();
+      await beginListening(session);
     })();
     return () => {
       cancelled = true;
@@ -149,90 +179,95 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     };
   }, [beginListening, phase, stage, title]);
 
-  const enterConfirm = useCallback(async () => {
-    if (finished.current) return;
+  const enterConfirm = useCallback(() => {
+    if (finished.current || stageRef.current === "confirm") return;
     stageRef.current = "confirm";
     setStage("confirm");
-    await stopTaskAlert().catch(() => {});
+    silenceTaskAlert().catch(() => {});
   }, []);
 
-  const rejectCall = useCallback(async () => {
+  const rejectCall = useCallback((overrideMinutes) => {
     if (busy || finished.current) return;
     setBusy(true);
-    await stopTaskAlert().catch(() => {});
-    const requested = phase === "end" ? END_FOLLOWUP_MIN : START_SNOOZE_MIN;
+    hangUp();
+    const requested = Number(overrideMinutes) > 0
+      ? Number(overrideMinutes)
+      : phase === "end"
+        ? END_FOLLOWUP_MIN
+        : START_SNOOZE_MIN;
     const resolved = resolveCallDelay(todayItems, { itemId, minutes: requested });
     const minutes = resolved.minutes;
     const payload = item || { _id: itemId, title, domain, durationMin, alertLevel: params.alertLevel };
-    await snoozeTaskCall(payload, { phase, minutes, items: todayItems }).catch(() => {});
-    if (!isPreview) {
-      try {
-        if (phase === "end") await dispatch(remindLaterItem({ itemId, minutes })).unwrap();
-        else await dispatch(snoozeItem({ itemId, minutes })).unwrap();
-      } catch (_e) {
-        // native snooze already armed
-      }
-    }
-    speakTaskPrompt(
-      phase === "end"
-        ? `Okay. I'll check again in ${minutes} minutes.`
-        : `Okay. I'll call again in ${minutes} minutes.`
-    ).catch(() => {});
-    leave();
-  }, [busy, dispatch, domain, durationMin, item, itemId, isPreview, leave, params.alertLevel, phase, title, todayItems]);
+    snoozeTaskCall(payload, { phase, minutes, items: todayItems }).catch(() => {});
+    if (isPreview) return;
+    if (phase === "end") dispatch(remindLaterItem({ itemId, minutes }));
+    else dispatch(snoozeItem({ itemId, minutes }));
+  }, [busy, dispatch, domain, durationMin, hangUp, item, itemId, isPreview, params.alertLevel, phase, title, todayItems]);
 
-  const acceptReady = useCallback(async () => {
+  const acceptReady = useCallback(() => {
     if (busy || finished.current) return;
     setBusy(true);
-    await stopTaskCallListening().catch(() => {});
-    if (!isPreview) {
-      try {
-        await dispatch(markItemReady(itemId)).unwrap();
-        await clearTaskCallOverride(itemId);
-      } catch (_e) {
-        setBusy(false);
-        return;
-      }
-    }
-    speakTaskPrompt("Good. I'll call you when the time is up.").catch(() => {});
-    leave();
-  }, [busy, dispatch, itemId, isPreview, leave]);
+    hangUp();
+    if (isPreview) return;
+    dispatch(markItemReady(itemId))
+      .unwrap()
+      .then(() => clearTaskCallOverride(itemId))
+      .catch(() => {});
+  }, [busy, dispatch, hangUp, itemId, isPreview]);
 
-  const acceptComplete = useCallback(async () => {
+  const acceptComplete = useCallback(() => {
     if (busy || finished.current) return;
     setBusy(true);
-    await stopTaskCallListening().catch(() => {});
-    if (!isPreview) {
-      try {
-        await dispatch(completeItem({ itemId, source: "task_call" })).unwrap();
-        await clearTaskCallOverride(itemId);
-      } catch (_e) {
-        setBusy(false);
-        return;
-      }
-    }
-    speakTaskPrompt("Nice. Marked done.").catch(() => {});
-    leave();
-  }, [busy, dispatch, itemId, isPreview, leave]);
+    hangUp();
+    if (isPreview) return;
+    dispatch(completeItem({ itemId, source: "task_call" }))
+      .unwrap()
+      .then(() => clearTaskCallOverride(itemId))
+      .catch(() => {});
+  }, [busy, dispatch, hangUp, itemId, isPreview]);
 
   useEffect(() => {
     return subscribeTaskCallSpeech((event) => {
-      if (stage !== "confirm" || busy || finished.current || voicePhaseRef.current !== "listening") return;
+      if (stageRef.current !== "confirm" || busy || finished.current) return;
+      if (event?.type === "ready") {
+        setVoicePhase("listening");
+        return;
+      }
       const text = event?.text || "";
+      const alternatives = Array.isArray(event?.alternatives) ? event.alternatives : [];
       if (event?.type === "partial" || event?.type === "result") setHeard(text);
       if (event?.type === "error") {
-        beginListening();
+        if (voicePhaseRef.current === "speaking") return;
+        if (listenTries.current >= 3) {
+          setVoicePhase("idle");
+          return;
+        }
+        listenTries.current += 1;
+        listenTimer.current = setTimeout(() => {
+          if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
+        }, 650);
         return;
       }
       if (event?.type !== "result") return;
-      const meaning = interpretCallReply(text, phase === "end" ? "complete" : "ready");
+      if (voicePhaseRef.current === "speaking") return;
+      listenTries.current = 0;
+      const meaning = interpretCallReplies(
+        [text, ...alternatives],
+        phase === "end" ? "complete" : "ready",
+        promptRef.current
+      );
+      const deferMin = interpretDeferMinutes([text, ...alternatives].filter(Boolean).join(" "));
       if (meaning === "ready") acceptReady();
-      else if (meaning === "snooze") rejectCall();
+      else if (meaning === "snooze") rejectCall(deferMin || undefined);
       else if (meaning === "complete") acceptComplete();
-      else if (meaning === "remind") rejectCall();
-      else beginListening();
+      else if (meaning === "remind") rejectCall(deferMin || undefined);
+      else {
+        listenTimer.current = setTimeout(() => {
+          if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
+        }, 400);
+      }
     });
-  }, [acceptComplete, acceptReady, beginListening, busy, phase, rejectCall, stage]);
+  }, [acceptComplete, acceptReady, beginListening, busy, phase, rejectCall]);
 
   const subtitle = phase === "end"
     ? "Time's up — did you finish?"
@@ -270,7 +305,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
               icon="time-outline"
               label={phase === "end" ? "Remind in 15m" : "Not now"}
               disabled={busy}
-              onPress={rejectCall}
+              onPress={() => rejectCall()}
             />
             <CallButton
               color={colors.success}
@@ -283,7 +318,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
         </>
       ) : (
         <View style={styles.row}>
-          <CallButton color={colors.danger} icon="call" iconStyle={styles.rejectIcon} label="Reject" disabled={busy} onPress={rejectCall} />
+          <CallButton color={colors.danger} icon="call" iconStyle={styles.rejectIcon} label="Reject" disabled={busy} onPress={() => rejectCall()} />
           <CallButton color={colors.success} icon="call" label="Answer" disabled={busy} onPress={enterConfirm} />
         </View>
       )}
@@ -293,7 +328,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
 function CallButton({ color, icon, label, onPress, disabled, iconStyle }) {
   return (
-    <Pressable style={styles.action} onPress={onPress} disabled={disabled}>
+    <Pressable style={styles.action} onPressIn={disabled ? undefined : onPress} disabled={disabled}>
       <View style={[styles.actionCircle, { backgroundColor: color, opacity: disabled ? 0.55 : 1 }]}>
         <Ionicons name={icon} size={28} color="#0a0b0d" style={iconStyle} />
       </View>

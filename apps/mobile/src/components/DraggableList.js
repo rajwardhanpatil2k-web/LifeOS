@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Animated, PanResponder, View } from "react-native";
 
 // Press-and-drag reordering built only on core RN APIs (PanResponder +
@@ -10,7 +10,7 @@ import { Animated, PanResponder, View } from "react-native";
 // stay put until you release, at which point the final vertical offset is
 // used to figure out the drop index and the list re-renders in its new
 // order. `onReorder` is called with the item ids in their new order.
-export default function DraggableList({ items, keyExtractor, renderItem, onReorder }) {
+function DraggableList({ items, keyExtractor, renderItem, onReorder }) {
   const [order, setOrder] = useState(items);
   const [dragId, setDragId] = useState(null);
   const orderRef = useRef(order);
@@ -80,7 +80,7 @@ export default function DraggableList({ items, keyExtractor, renderItem, onReord
   }
 
   return (
-    <View>
+    <View collapsable={false}>
       {order.map((item) => {
         const id = keyExtractor(item);
         const isDragging = dragId === id;
@@ -100,3 +100,5 @@ export default function DraggableList({ items, keyExtractor, renderItem, onReord
     </View>
   );
 }
+
+export default memo(DraggableList);

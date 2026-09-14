@@ -36,6 +36,7 @@ export function getColors(mode) {
 }
 
 export const FOCUS_DOMAINS = ["skin", "hair", "fitness", "learning"];
+export const AI_COLOR = "#6d8cff";
 
 // Domain accents get a slightly deeper/more saturated variant in light mode
 // so they keep enough contrast against a white card instead of washing out.
