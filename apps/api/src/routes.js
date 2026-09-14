@@ -208,7 +208,7 @@ function clearItemHold(item) {
   item.holdReason = undefined;
 }
 
-async function logSkippedDuringFocus(user, date, skipped) {
+async function logSkippedItems(user, date, skipped, source = "focus_block") {
   for (const item of skipped || []) {
     await LifeEvent.create({
       userId: user._id,
@@ -217,10 +217,15 @@ async function logSkippedDuringFocus(user, date, skipped) {
       type: "skip_item",
       itemKey: item.key,
       status: "skipped",
-      notes: item.skippedReason || "missed_during_focus",
-      source: "focus_block",
+      notes: item.skippedReason || "skipped",
+      meta: { itemId: String(item._id || "") },
+      source,
     });
   }
+}
+
+async function logSkippedDuringFocus(user, date, skipped) {
+  return logSkippedItems(user, date, skipped, "focus_block");
 }
 
 function registerRoutes(app) {
@@ -620,13 +625,14 @@ function registerRoutes(app) {
     const plan = await ensureDailyPlan(user, date);
     const transcript = String(req.body.transcript || "").trim();
     if (transcript.length < 3) {
-      return res.status(400).json({ error: "Say a task, pause alarms, or remind you later." });
+      return res.status(400).json({ error: "Say a task, pause alarms, skip tasks, or remind you later." });
     }
+    const itemIds = Array.isArray(req.body.itemIds) ? req.body.itemIds.map((id) => String(id)).filter(Boolean) : [];
 
-    const result = await runAssistant(user, plan, transcript);
+    const result = await runAssistant(user, plan, transcript, { itemIds });
     if (result.intent === "unknown") {
       return res.status(400).json({
-        error: result.error || "I can add a task, pause alarms, or remind you later.",
+        error: result.error || "I can add a task, pause alarms, skip tasks, or remind you later.",
         intent: "unknown",
       });
     }
@@ -644,23 +650,33 @@ function registerRoutes(app) {
             ? "focus_resume"
             : result.intent === "defer_task"
               ? "defer_item"
-              : "add_voice_task";
+              : result.intent === "skip_tasks"
+                ? "skip_day"
+                : "add_voice_task";
     await LifeEvent.create({
       userId: user._id,
       date,
       domain: result.item?.domain || "ops",
       type: eventType,
       itemKey: result.item?.key,
-      status: result.intent === "pause_focus" ? "paused" : "pending",
+      status: result.intent === "pause_focus" ? "paused" : result.intent === "skip_tasks" ? "skipped" : "pending",
       notes: transcript,
       meta: {
         intent: result.intent,
         until: result.preview?.scheduledAt,
-        reason: result.preview?.reason,
+        reason: result.preview?.reason || result.parsed?.reason,
+        skipScope: result.parsed?.skipScope,
+        skippedCount: Array.isArray(result.skipped) ? result.skipped.length : 0,
+        skippedKeys: (result.skipped || []).map((item) => item.key).filter(Boolean),
       },
       source: "ai",
     });
-    await logSkippedDuringFocus(user, date, result.skipped);
+    await logSkippedItems(
+      user,
+      date,
+      result.skipped,
+      result.intent === "skip_tasks" ? "ai" : "focus_block"
+    );
     const scored = await saveScore(user, plan);
     res.json({
       intent: result.intent,

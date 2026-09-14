@@ -74,7 +74,11 @@ export default function DayDetailScreen({ route }) {
 function DayItem({ item, interactive, dispatch, styles, domainMeta }) {
   const meta = domainMeta(item.domain);
   const isAi = item.source === "ai" || item.carryForward;
-  const mark = item.status === "done" ? "✓ Done" : item.status === "skipped" ? "– Skipped" : null;
+  const mark = item.status === "done"
+    ? "✓ Done"
+    : item.status === "skipped"
+      ? `– Skipped${item.skippedReason ? ` · ${item.skippedReason}` : ""}`
+      : null;
   return (
     <View style={[styles.card, { borderLeftColor: isAi ? AI_COLOR : meta.color }, isAi && styles.cardAi, item.status !== "pending" && styles.faded]}>
       <View style={styles.topRow}>
@@ -127,7 +131,7 @@ function DayItem({ item, interactive, dispatch, styles, domainMeta }) {
         ) : (
           <View style={styles.row}>
             <Text style={[styles.statusTag, item.status === "done" ? styles.statusDone : styles.statusSkipped]}>
-              {item.status}
+              {item.status === "skipped" && item.skippedReason ? `skipped · ${item.skippedReason}` : item.status}
             </Text>
             <Pressable style={styles.btnUndo} onPress={() => dispatch(undoItem(item._id))}>
               <Text style={styles.btnUndoText}>Undo</Text>

@@ -21,6 +21,8 @@ export default function TodayScreen({ navigation }) {
   const error = useSelector((s) => s.today.error);
   const focusBlock = data?.focusBlock;
   const [remindersEnabled, setRemindersEnabled] = useState(true);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
   const { colors, domainMeta } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -40,18 +42,39 @@ export default function TodayScreen({ navigation }) {
 
   const onReorder = useCallback((order) => dispatch(reorderItems(order)), [dispatch]);
   const keyExtractor = useCallback((item) => item._id, []);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  const toggleSelectMode = useCallback(() => {
+    setSelectMode((on) => {
+      if (on) setSelectedIds([]);
+      return !on;
+    });
+  }, []);
+
+  const toggleSelected = useCallback((itemId) => {
+    const id = String(itemId);
+    setSelectedIds((current) => (current.includes(id) ? current.filter((row) => row !== id) : [...current, id]));
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds([]);
+    setSelectMode(false);
+  }, []);
 
   const renderItem = useCallback(
     ({ item, isDragging, dragHandleProps }) => (
       <ItemCard
         item={item}
         isDragging={isDragging}
-        dragHandleProps={dragHandleProps}
+        dragHandleProps={selectMode ? undefined : dragHandleProps}
         styles={styles}
         domainMeta={domainMeta}
+        selectMode={selectMode}
+        selected={selectedSet.has(String(item._id))}
+        onToggleSelect={() => toggleSelected(item._id)}
       />
     ),
-    [styles, domainMeta]
+    [styles, domainMeta, selectMode, selectedSet, toggleSelected]
   );
 
   const focusStats = useMemo(() => {
@@ -112,7 +135,7 @@ export default function TodayScreen({ navigation }) {
         <Text style={styles.editScheduleBtnText}>Edit schedule & add tasks</Text>
         <Text style={styles.editScheduleBtnHint}>Adjust times · add extras for today</Text>
       </Pressable>
-      <AiTaskComposer />
+      <AiTaskComposer selectedIds={selectedIds} onConsumed={clearSelection} />
       {focusBlock?.active ? (
         <View style={styles.focusChip}>
           <View style={styles.focusChipCopy}>
@@ -130,9 +153,18 @@ export default function TodayScreen({ navigation }) {
         </View>
       ) : null}
 
-      <Text style={styles.sectionLabel}>Today, in order</Text>
+      <View style={styles.sectionRow}>
+        <Text style={styles.sectionLabel}>Today, in order</Text>
+        <Pressable onPress={toggleSelectMode} hitSlop={8}>
+          <Text style={styles.selectToggle}>{selectMode ? "Done" : "Select"}</Text>
+        </Pressable>
+      </View>
       <Text style={styles.dragHint}>
-        Hold ⠿ to drag and reorder — times swap to match. Dashed = optional. Double-tap a step to undo the whole item.
+        {selectMode
+          ? selectedIds.length
+            ? `${selectedIds.length} selected · Ask AI why you're skipping them`
+            : "Tap tasks to select, then Ask AI to skip them with a reason."
+          : "Hold ⠿ to drag and reorder — times swap to match. Dashed = optional. Double-tap a step to undo the whole item."}
       </Text>
       <DraggableList
         items={data.items}
@@ -144,7 +176,16 @@ export default function TodayScreen({ navigation }) {
   );
 }
 
-const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, styles, domainMeta }) {
+const ItemCard = memo(function ItemCard({
+  item,
+  isDragging,
+  dragHandleProps,
+  styles,
+  domainMeta,
+  selectMode,
+  selected,
+  onToggleSelect,
+}) {
   const dispatch = useDispatch();
   const meta = domainMeta(item.domain);
   const isOptional = item.alertLevel === "info";
@@ -173,12 +214,18 @@ const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, sty
         { borderLeftColor: isAi ? AI_COLOR : meta.color },
         isOptional && styles.cardOptional,
         isAi && styles.cardAi,
+        selected && styles.cardSelected,
         item.status !== "pending" && styles.faded,
         isDragging && styles.cardDragging,
       ]}
     >
       <View style={styles.cardHeadRow}>
         <View style={styles.badgeRow}>
+          {selectMode && item.status === "pending" ? (
+            <Pressable onPress={onToggleSelect} style={[styles.selectDot, selected && styles.selectDotOn]} hitSlop={8}>
+              {selected ? <Text style={styles.selectDotCheck}>✓</Text> : null}
+            </Pressable>
+          ) : null}
           <View style={[styles.badge, { backgroundColor: (isAi ? AI_COLOR : meta.color) + "29" }]}>
             <Text style={[styles.badgeText, { color: isAi ? AI_COLOR : meta.color }]}>{meta.label}</Text>
           </View>
@@ -198,14 +245,18 @@ const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, sty
             </View>
           ) : null}
         </View>
-        <View {...dragHandleProps} style={styles.dragHandle}>
-          <Text style={styles.dragHandleText}>⠿</Text>
-        </View>
+        {selectMode || !dragHandleProps ? null : (
+          <View {...dragHandleProps} style={styles.dragHandle}>
+            <Text style={styles.dragHandleText}>⠿</Text>
+          </View>
+        )}
       </View>
-      <Text style={styles.cardTitle}>{item.title}</Text>
-      <Text style={styles.cardTime}>
-        {formatClock12(item.scheduledAt)} · {item.durationMin}m
-      </Text>
+      <Pressable onPress={selectMode && item.status === "pending" ? onToggleSelect : undefined}>
+        <Text style={styles.cardTitle}>{item.title}</Text>
+        <Text style={styles.cardTime}>
+          {formatClock12(item.scheduledAt)} · {item.durationMin}m
+        </Text>
+      </Pressable>
       {(item.steps || []).map((step) => (
         <Pressable key={step.key} style={styles.stepRow} onPress={() => onStepPress(step)}>
           <View style={[styles.dot, step.done && styles.dotDone]}>
@@ -214,7 +265,7 @@ const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, sty
           <Text style={[styles.step, step.done && styles.stepDone]}>{step.label}</Text>
         </Pressable>
       ))}
-      {item.status === "pending" ? (
+      {item.status === "pending" && !selectMode ? (
         <View style={styles.row}>
           <Pressable style={styles.btnDone} onPress={() => dispatch(completeItem(item._id))}>
             <Text style={styles.btnDoneText}>Mark done</Text>
@@ -223,10 +274,10 @@ const ItemCard = memo(function ItemCard({ item, isDragging, dragHandleProps, sty
             <Text style={styles.btnSkipText}>Skip</Text>
           </Pressable>
         </View>
-      ) : (
+      ) : item.status === "pending" ? null : (
         <View style={styles.row}>
           <Text style={[styles.statusTag, item.status === "done" ? styles.statusDone : styles.statusSkipped]}>
-            {item.status}
+            {item.status === "skipped" && item.skippedReason ? `skipped · ${item.skippedReason}` : item.status}
           </Text>
           <Pressable style={styles.btnUndo} onPress={() => dispatch(undoItem(item._id))}>
             <Text style={styles.btnUndoText}>Undo</Text>
@@ -292,8 +343,23 @@ function createStyles(colors) {
     focusChipPrimary: { backgroundColor: "#6d8cff", borderRadius: 9, paddingVertical: 8, paddingHorizontal: 12 },
     focusChipPrimaryText: { color: "#0a0b12", fontWeight: "800", fontSize: 12 },
 
-    sectionLabel: { color: colors.muted2, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 4 },
+    sectionRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
+    sectionLabel: { color: colors.muted2, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 },
+    selectToggle: { color: colors.gold, fontSize: 12, fontWeight: "700" },
     dragHint: { color: colors.muted2, fontSize: 10.5, fontStyle: "italic", marginBottom: 10 },
+    cardSelected: { borderColor: "rgba(109,140,255,0.55)", backgroundColor: "rgba(109,140,255,0.08)" },
+    selectDot: {
+      width: 18,
+      height: 18,
+      borderRadius: 9,
+      borderWidth: 1.5,
+      borderColor: "rgba(109,140,255,0.7)",
+      marginBottom: 6,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    selectDotOn: { backgroundColor: "#6d8cff", borderColor: "#6d8cff" },
+    selectDotCheck: { color: "#0a0b12", fontSize: 11, fontWeight: "800" },
 
     card: {
       backgroundColor: colors.card,

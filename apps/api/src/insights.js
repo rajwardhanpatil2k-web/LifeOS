@@ -199,8 +199,12 @@ async function computePeriodStats(user, { period = "month", date, today }) {
       else entry.pending += 1;
       if (item.status === "skipped" && item.skippedReason) {
         entry.skipReasons.push(item.skippedReason);
-        const reason = String(item.skippedReason).trim().toLowerCase();
-        skipReasonMap.set(reason, (skipReasonMap.get(reason) || 0) + 1);
+        const key = String(item.skippedReason).trim().toLowerCase();
+        const prev = skipReasonMap.get(key);
+        skipReasonMap.set(key, {
+          reason: prev?.reason || String(item.skippedReason).trim(),
+          count: (prev?.count || 0) + 1,
+        });
       }
 
       // How late did it actually happen? The item finishes when its last step
@@ -319,7 +323,7 @@ async function computePeriodStats(user, { period = "month", date, today }) {
       delta: firstHalf !== null && secondHalf !== null ? secondHalf - firstHalf : null,
     },
     skipReasons: [...skipReasonMap.entries()]
-      .map(([reason, count]) => ({ reason, count }))
+      .map(([, entry]) => entry)
       .sort((a, b) => b.count - a.count)
       .slice(0, 8),
     timeline: days,

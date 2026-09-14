@@ -9,7 +9,7 @@
     "seed": "node src/seed/run.js",
     "demo:backfill": "node src/seed/backfillDemo.js",
     "demo:clear": "node src/seed/backfillDemo.js --clear",
-    "test": "node --test src/focusBlock.test.js"
+    "test": "node --test src/*.test.js"
   },
   "engines": {
     "node": ">=20"

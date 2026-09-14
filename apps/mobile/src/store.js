@@ -44,9 +44,11 @@ export const updateItemSchedule = createAsyncThunk("today/updateSchedule", async
 export const addTodayItem = createAsyncThunk("today/addItem", async (payload) =>
   api("/api/today/items", { method: "POST", body: JSON.stringify(payload) })
 );
-export const addVoiceTask = createAsyncThunk("today/voiceTask", async (transcript) =>
-  api("/api/tasks/voice", { method: "POST", body: JSON.stringify({ transcript }) })
-);
+export const addVoiceTask = createAsyncThunk("today/voiceTask", async (payload) => {
+  const transcript = typeof payload === "string" ? payload : payload?.transcript;
+  const itemIds = typeof payload === "object" && Array.isArray(payload?.itemIds) ? payload.itemIds : [];
+  return api("/api/tasks/voice", { method: "POST", body: JSON.stringify({ transcript, itemIds }) });
+});
 export const pauseFocus = createAsyncThunk("today/pauseFocus", async ({ durationMin, reason, until } = {}) =>
   api("/api/focus/pause", { method: "POST", body: JSON.stringify({ durationMin, reason, until }) })
 );

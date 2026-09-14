@@ -38,11 +38,12 @@ describe("parseDurationMin", () => {
 });
 
 describe("fallbackAssistant", () => {
-  it("classifies pause, resume, defer, and add", () => {
+  it("classifies pause, resume, defer, add, and skip", () => {
     assert.equal(fallbackAssistant("Don't disturb me for two hours, I'm cutting my hair").intent, "pause_focus");
     assert.equal(fallbackAssistant("I'm back").intent, "resume_focus");
     assert.equal(fallbackAssistant("For workout, alert me after 30 minutes").intent, "defer_task");
     assert.equal(fallbackAssistant("laundry around 8 PM").intent, "add_task");
+    assert.equal(fallbackAssistant("skip all tasks today, I'm busy with other work").intent, "skip_tasks");
   });
 });
 

@@ -17,6 +17,15 @@ const {
   previewForDefer,
   previewForResume,
 } = require("./focusBlock");
+const {
+  parseSkipReason,
+  parseSkipTitleQuery,
+  detectSkipScope,
+  skipRemainingToday,
+  skipSelected,
+  skipNamed,
+  previewForSkip,
+} = require("./skipTasks");
 
 const DOMAINS = LIFE_AREAS.map((area) => area.key);
 
@@ -51,6 +60,7 @@ const ASSISTANT_SCHEMA = {
     "durationMin",
     "until",
     "reason",
+    "skipScope",
     "titleQuery",
     "delayMin",
     "title",
@@ -62,7 +72,11 @@ const ASSISTANT_SCHEMA = {
   properties: {
     intent: {
       type: "string",
-      enum: ["add_task", "pause_focus", "defer_task", "resume_focus", "extend_focus", "unknown"],
+      enum: ["add_task", "pause_focus", "defer_task", "resume_focus", "extend_focus", "skip_tasks", "unknown"],
+    },
+    skipScope: {
+      type: "string",
+      enum: ["today", "selected", "named", ""],
     },
     confidence: { type: "number" },
     durationMin: { type: "integer" },
@@ -179,8 +193,18 @@ function parseExtendMin(transcript) {
   return 30;
 }
 
-function fallbackAssistant(transcript) {
+function fallbackAssistant(transcript, { itemIds = [] } = {}) {
   const lower = String(transcript || "").toLowerCase().replace(/['’]/g, "");
+  const skip = detectSkipScope(transcript, itemIds);
+  if (skip) {
+    return {
+      intent: "skip_tasks",
+      skipScope: skip.scope,
+      titleQuery: skip.titleQuery || parseSkipTitleQuery(transcript),
+      reason: parseSkipReason(transcript) || parseReason(transcript),
+      confidence: 0.94,
+    };
+  }
   if (/\b(im back|i am back|resume alarms|cancel (dnd|pause|do not disturb)|stop (the )?(pause|dnd)|alarms back on)\b/.test(lower)) {
     return { intent: "resume_focus", confidence: 0.95 };
   }
@@ -229,6 +253,9 @@ function normalizeParsed(data, fallback) {
     durationMin,
     until,
     reason: String(data?.reason || fallback.reason || "").trim(),
+    skipScope: ["today", "selected", "named"].includes(data?.skipScope)
+      ? data.skipScope
+      : fallback.skipScope || "",
     titleQuery: String(data?.titleQuery || fallback.titleQuery || "").trim(),
     delayMin,
     title: String(data?.title || "").trim(),
@@ -242,8 +269,8 @@ function normalizeParsed(data, fallback) {
   };
 }
 
-async function parseAssistantRequest(transcript, plan) {
-  const fallback = fallbackAssistant(transcript);
+async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
+  const fallback = fallbackAssistant(transcript, { itemIds });
   const pending = (plan.items || [])
     .filter((item) => item.status === "pending")
     .map((item) => `${item.title} (${item.scheduledAt}, ${item.domain})`)
@@ -253,14 +280,18 @@ async function parseAssistantRequest(transcript, plan) {
   const parsed = await chatJson({
     system:
       "You classify a spoken Life OS request for today in Asia/Kolkata. " +
-      "pause_focus = do not disturb / mute all task alarms for a while (haircut, outside, busy). " +
+      "skip_tasks = they will NOT do remaining or selected tasks today (festival, meeting, visiting, busy with other work). " +
+      "skipScope is today (all remaining), selected (the tasks they highlighted), or named (one task by title). " +
+      "reason is why they skipped, for later insights. " +
+      "pause_focus = do not disturb / mute all task alarms for a while (haircut, outside, busy) and come back later. " +
       "If they give a range like 1-2 hours, durationMin is the UPPER bound. " +
       "until is HH:MM 24h if they named a clock, else empty. " +
       "defer_task = remind/alert about an EXISTING task in N minutes. " +
       "resume_focus = I'm back, turn alarms on. extend_focus = add more mute time. " +
       "add_task = create a new calendar task. " +
+      "Skip wins over pause when they say skip / not doing / cancel today's tasks. " +
       "Do not turn a haircut/outside/DND request into add_task.",
-    user: `Pending tasks: ${pending || "none"}\nSpoken: ${String(transcript || "").trim()}`,
+    user: `Pending tasks: ${pending || "none"}\nSelected task ids: ${(itemIds || []).join(", ") || "none"}\nSpoken: ${String(transcript || "").trim()}`,
     schema: ASSISTANT_SCHEMA,
     schemaName: "lifeos_assistant",
     maxTokens: 280,
@@ -268,6 +299,9 @@ async function parseAssistantRequest(transcript, plan) {
   });
 
   const merged = normalizeParsed(parsed?.data, fallback);
+  if (fallback.intent === "skip_tasks") {
+    return { ...merged, ...fallback, intent: "skip_tasks", confidence: Math.max(merged.confidence, fallback.confidence) };
+  }
   if (fallback.intent === "pause_focus" || fallback.intent === "resume_focus" || fallback.intent === "extend_focus") {
     return { ...merged, ...fallback, intent: fallback.intent, confidence: Math.max(merged.confidence, fallback.confidence) };
   }
@@ -281,8 +315,32 @@ async function parseAssistantRequest(transcript, plan) {
   return merged;
 }
 
-async function runAssistant(user, plan, transcript) {
-  const parsed = await parseAssistantRequest(transcript, plan);
+async function runAssistant(user, plan, transcript, { itemIds = [] } = {}) {
+  const parsed = await parseAssistantRequest(transcript, plan, { itemIds });
+
+  if (parsed.intent === "skip_tasks") {
+    const reason = parsed.reason || parseSkipReason(transcript);
+    let result;
+    if (parsed.skipScope === "selected") {
+      if (!itemIds.length) {
+        return { intent: "unknown", parsed, error: "Select the tasks first, then tell me why you're skipping them." };
+      }
+      result = skipSelected(plan, itemIds, reason);
+    } else if (parsed.skipScope === "named") {
+      result = skipNamed(plan, parsed.titleQuery, reason);
+    } else {
+      result = skipRemainingToday(plan, reason);
+    }
+    if (!result.skipped.length) {
+      return { intent: "unknown", parsed, error: "Nothing pending to skip. The wake alarm stays on." };
+    }
+    return {
+      intent: "skip_tasks",
+      parsed,
+      preview: previewForSkip(result),
+      skipped: result.skipped,
+    };
+  }
 
   if (parsed.intent === "pause_focus") {
     const result = startFocusBlock(user, plan, {
@@ -365,7 +423,7 @@ async function runAssistant(user, plan, transcript) {
   return {
     intent: "unknown",
     parsed,
-    error: "I can add a task, pause alarms, or remind you later.",
+    error: "I can add a task, pause alarms, skip tasks, or remind you later.",
   };
 }
 

@@ -13,7 +13,7 @@ import {
 
 const AI_COLOR = "#6d8cff";
 
-export default function AiTaskComposer() {
+export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
   const dispatch = useDispatch();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -24,6 +24,7 @@ export default function AiTaskComposer() {
   const [preview, setPreview] = useState(null);
   const adding = useRef(false);
   const submitRef = useRef(null);
+  const selectedCount = selectedIds.length;
 
   const close = useCallback(() => {
     adding.current = false;
@@ -43,9 +44,10 @@ export default function AiTaskComposer() {
       setPhase("saving");
       setError("");
       try {
-        const result = await dispatch(addVoiceTask(text)).unwrap();
+        const result = await dispatch(addVoiceTask({ transcript: text, itemIds: selectedIds })).unwrap();
         setPreview(result.preview || result.parsed || result.item);
         setPhase(result.intent || "done");
+        if (result.intent === "skip_tasks") onConsumed?.();
         setTimeout(close, 1400);
       } catch (err) {
         adding.current = false;
@@ -53,7 +55,7 @@ export default function AiTaskComposer() {
         setPhase("error");
       }
     },
-    [close, dispatch]
+    [close, dispatch, onConsumed, selectedIds]
   );
   submitRef.current = submit;
 
@@ -95,7 +97,11 @@ export default function AiTaskComposer() {
         <Ionicons name="sparkles" size={16} color={AI_COLOR} />
         <View style={styles.launchCopy}>
           <Text style={styles.launchTitle}>Ask AI</Text>
-          <Text style={styles.launchHint}>Add a task, pause alarms, or remind me later</Text>
+          <Text style={styles.launchHint}>
+            {selectedCount
+              ? `Skip ${selectedCount} selected, skip the rest of today, or add a task`
+              : "Add a task, pause alarms, skip today, or remind me later"}
+          </Text>
         </View>
       </Pressable>
 
@@ -114,12 +120,16 @@ export default function AiTaskComposer() {
                       ? "Alarms back on"
                       : phase === "defer_task"
                         ? "I'll alert you"
-                        : phase === "add_task" || phase === "done"
-                          ? "Added for today"
-                          : "What should I do?"}
+                        : phase === "skip_tasks"
+                          ? "Skipped"
+                          : phase === "add_task" || phase === "done"
+                            ? "Added for today"
+                            : "What should I do?"}
             </Text>
             <Text style={styles.sheetHint}>
-              Add a task, pause alarms while you’re out, or say “alert me after 30 minutes.” Missed slots come back one at a time.
+              {selectedCount
+                ? `Say why you're skipping the ${selectedCount} selected task${selectedCount === 1 ? "" : "s"} — festival, meeting, visiting work.`
+                : "Add a task, pause alarms, skip the rest of today, or say “alert me after 30 minutes.”"}
             </Text>
             {heard ? <Text style={styles.heard}>“{heard}”</Text> : null}
             {preview ? (
@@ -137,7 +147,7 @@ export default function AiTaskComposer() {
             {phase === "type" || phase === "error" ? (
               <TextInput
                 style={styles.input}
-                placeholder="Don't disturb me for an hour, or laundry around 8 PM"
+                placeholder="Skip these, I'm at Ganesh Chaturthi"
                 placeholderTextColor={colors.muted2}
                 value={heard}
                 onChangeText={setHeard}
