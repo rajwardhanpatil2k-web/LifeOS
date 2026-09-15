@@ -199,11 +199,13 @@ function publicFocusBlock(user, now = new Date()) {
   };
 }
 
-function expireFocusBlockIfNeeded(user, now = new Date()) {
+function expireFocusBlockIfNeeded(user, plan, now = new Date()) {
   if (!user?.focusBlock?.active) return false;
   const until = user.focusBlock.until ? new Date(user.focusBlock.until).getTime() : 0;
   if (until > now.getTime()) return false;
+  if (plan) applyCatchUp(plan, user, now);
   user.focusBlock.active = false;
+  user.focusBlock.until = now;
   return true;
 }
 

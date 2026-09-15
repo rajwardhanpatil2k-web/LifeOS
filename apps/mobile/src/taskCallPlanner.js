@@ -3,7 +3,6 @@ import {
   AFTER_CALL_COOLDOWN_MS,
   CALL_GAP_MS,
   durationOf,
-  END_CALL_LEAD_MS,
   endTimeMillis,
   startMillis,
 } from "./taskCallConfig";
@@ -21,25 +20,6 @@ function isCallableItem(item) {
 function isFlexible(draft) {
   if (draft.phase === "end") return !!draft.item.followUpUntil;
   return !!draft.item.snoozeUntil;
-}
-
-function nextTaskStartMs(item, pending) {
-  const myStart = startMillis(item.scheduledAt);
-  let next = Infinity;
-  for (const other of pending) {
-    if (String(other._id) === String(item._id)) continue;
-    const otherStart = Math.max(startMillis(other.scheduledAt), parseMillis(other.snoozeUntil));
-    if (otherStart > myStart && otherStart < next) next = otherStart;
-  }
-  return Number.isFinite(next) ? next : -1;
-}
-
-function pullEndBeforeNextStart(item, endAt, pending) {
-  const nextStart = nextTaskStartMs(item, pending);
-  if (nextStart <= 0 || endAt + CALL_GAP_MS <= nextStart) return endAt;
-  const started = parseMillis(item.startedAt);
-  const earliest = Math.max(startMillis(item.scheduledAt) + 60_000, started > 0 ? started + 30_000 : 0);
-  return Math.max(earliest, nextStart - END_CALL_LEAD_MS);
 }
 
 function clampPause(at, now, pausedUntil) {
@@ -63,15 +43,16 @@ function draftCall(item, pending, now, pausedUntil = 0) {
 
   if (item.startedAt) {
     let at = Math.max(endTimeMillis(item), parseMillis(item.followUpUntil));
-    at = pullEndBeforeNextStart(item, at, pending);
-    if (at <= now + 1_000) at = now + 4_000;
+    // Full duration from "I'm ready" — never pull this forward to make room
+    // for the next task. Later start-calls wait via otherInProgressUntil.
+    if (at <= now + 1_000) at = now + AFTER_CALL_COOLDOWN_MS;
     at = clampPause(at, now, pausedUntil);
     return { item, phase: "end", at, flexible: !!item.followUpUntil };
   }
 
   let at = Math.max(startMillis(item.scheduledAt), parseMillis(item.snoozeUntil));
   if (at <= now + 1_000) {
-    const recentlyDue = startMillis(item.scheduledAt) > now - 4 * 60 * 60 * 1000;
+    const recentlyDue = startMillis(item.scheduledAt) > now - 20 * 60 * 60 * 1000;
     if (parseMillis(item.snoozeUntil) || recentlyDue) at = now + AFTER_CALL_COOLDOWN_MS;
     else return null;
   }
@@ -107,10 +88,9 @@ function spaceCalls(drafts, now) {
 
   const placed = [];
   for (const draft of sorted) {
-    const floor =
-      draft.phase === "end" || draft.at > now + AFTER_CALL_COOLDOWN_MS
-        ? now + 2_000
-        : now + AFTER_CALL_COOLDOWN_MS;
+    const floor = draft.at > now + AFTER_CALL_COOLDOWN_MS
+      ? now + 2_000
+      : now + AFTER_CALL_COOLDOWN_MS;
     const at = nextFreeSlot(Math.max(draft.at, floor), placed.map((row) => row.at));
     placed.push({ ...draft, at });
   }
@@ -125,7 +105,7 @@ function toReminder(draft, { voiceAlerts, name }) {
       : composeStartCallCue(item, name)
     : "";
   return {
-    id: String(item._id),
+    id: String(item._id || item.originKey || item.key || ""),
     title: String(item.title || "Task"),
     spokenText,
     alertLevel: item.alertLevel === "info" ? "info" : item.alertLevel || "normal",

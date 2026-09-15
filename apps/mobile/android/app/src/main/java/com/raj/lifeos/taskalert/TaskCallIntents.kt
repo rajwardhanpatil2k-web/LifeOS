@@ -49,7 +49,6 @@ object TaskCallIntents {
     intent.action = Intent.ACTION_VIEW
     intent.data = uri(id, phase, title, alertLevel, durationMin, domain, pickedUp)
     intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-      Intent.FLAG_ACTIVITY_CLEAR_TOP or
       Intent.FLAG_ACTIVITY_SINGLE_TOP or
       Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
     return intent

@@ -2,6 +2,7 @@ package com.raj.lifeos.taskalert
 
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -215,9 +216,9 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun setCallUiVisible(visible: Boolean, promise: Promise) {
     try {
-      TaskCallState.inSession = visible || TaskCallState.ringing
-      if (visible) TaskAlertService.hideNotification(reactApplicationContext)
-      else TaskAlertService.showNotification(reactApplicationContext)
+      if (visible && TaskCallState.ringing) {
+        TaskAlertService.showNotification(reactApplicationContext)
+      }
       promise.resolve(true)
     } catch (e: Exception) {
       promise.reject("TASK_CALL_UI_FAILED", e)
@@ -228,7 +229,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   fun speakPrompt(text: String, promise: Promise) {
     mainHandler.post {
       try {
-        stopRecognizer()
+        pauseRecognizer()
         speakPromise?.resolve(true)
         speakPromise = promise
         pendingPrompt = text.trim()
@@ -237,30 +238,35 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
           promise.resolve(true)
           return@post
         }
+        armSpeakTimeout()
         if (promptTts == null) {
           promptTts = TextToSpeech(reactApplicationContext) { status ->
             if (status != TextToSpeech.SUCCESS) {
+              promptTts = null
+              promptTtsReady = false
               finishSpeak(false)
               return@TextToSpeech
             }
             val engine = promptTts ?: return@TextToSpeech
             try {
-              engine.language = Locale("en", "IN")
-            } catch (_: Exception) {
               engine.language = Locale.US
+            } catch (_: Exception) {
+              engine.language = Locale("en", "IN")
             }
-            engine.setSpeechRate(0.90f)
-            engine.setPitch(0.97f)
+            engine.setSpeechRate(0.92f)
+            engine.setPitch(1.0f)
             engine.setAudioAttributes(
               AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .setUsage(AudioAttributes.USAGE_ALARM)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
             )
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-              override fun onStart(utteranceId: String?) {}
+              override fun onStart(utteranceId: String?) {
+                armSpeakTimeout()
+              }
               override fun onDone(utteranceId: String?) {
-                mainHandler.post { finishSpeak(true) }
+                mainHandler.postDelayed({ finishSpeak(true) }, 450L)
               }
               @Deprecated("Deprecated in Java")
               override fun onError(utteranceId: String?) {
@@ -276,7 +282,6 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
         } else if (promptTtsReady) {
           speakPendingPrompt()
         }
-        armSpeakTimeout()
       } catch (e: Exception) {
         speakPromise = null
         promise.reject("TASK_SPEAK_FAILED", e)
@@ -342,12 +347,13 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   fun startListening(promise: Promise) {
     mainHandler.post {
       try {
-        stopRecognizer()
+        pauseRecognizer()
         if (!SpeechRecognizer.isRecognitionAvailable(reactApplicationContext)) {
           promise.reject("SPEECH_UNAVAILABLE", "Speech recognition is not available on this device")
           return@post
         }
-        val engine = SpeechRecognizer.createSpeechRecognizer(reactApplicationContext)
+        val host = currentActivity ?: reactApplicationContext
+        val engine = recognizer ?: SpeechRecognizer.createSpeechRecognizer(host)
         recognizer = engine
         engine.setRecognitionListener(object : RecognitionListener {
           override fun onReadyForSpeech(params: Bundle?) {
@@ -375,18 +381,28 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
           }
           override fun onEvent(eventType: Int, params: Bundle?) {}
         })
+        try {
+          val am = reactApplicationContext.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+          am.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) {}
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale("en", "IN").toLanguageTag())
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-IN")
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.US.toLanguageTag())
         intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500)
-        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
-        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500)
-        listening = true
-        engine.startListening(intent)
-        promise.resolve(true)
+        intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
+        mainHandler.postDelayed({
+          try {
+            listening = true
+            engine.startListening(intent)
+            promise.resolve(true)
+          } catch (e: Exception) {
+            listening = false
+            promise.reject("SPEECH_START_FAILED", e)
+          }
+        }, 220L)
+        return@post
       } catch (e: Exception) {
         listening = false
         promise.reject("SPEECH_START_FAILED", e)
@@ -413,7 +429,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   private fun armSpeakTimeout() {
     speakTimeout?.let { mainHandler.removeCallbacks(it) }
     speakTimeout = Runnable { finishSpeak(true) }
-    mainHandler.postDelayed(speakTimeout!!, 8_000L)
+    mainHandler.postDelayed(speakTimeout!!, 20_000L)
   }
 
   private fun speakPendingPrompt() {
@@ -424,6 +440,8 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
     val utteranceId = "task-prompt-${System.currentTimeMillis()}"
     val params = Bundle()
     params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+    params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_ALARM)
+    params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
     engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
   }
 
@@ -431,16 +449,19 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
     speakTimeout?.let { mainHandler.removeCallbacks(it) }
     speakTimeout = null
     pendingPrompt = null
-    try { promptTts?.stop() } catch (_: Exception) {}
     val promise = speakPromise
     speakPromise = null
     try { promise?.resolve(ok) } catch (_: Exception) {}
   }
 
-  private fun stopRecognizer() {
+  private fun pauseRecognizer() {
     listening = false
     try { recognizer?.stopListening() } catch (_: Exception) {}
     try { recognizer?.cancel() } catch (_: Exception) {}
+  }
+
+  private fun stopRecognizer() {
+    pauseRecognizer()
     try { recognizer?.destroy() } catch (_: Exception) {}
     recognizer = null
   }

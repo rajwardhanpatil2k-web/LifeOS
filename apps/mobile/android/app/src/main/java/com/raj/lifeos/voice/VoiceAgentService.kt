@@ -42,7 +42,7 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (AlarmRingingService.isRinging()) {
+    if (AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy()) {
       stopSelf()
       return START_NOT_STICKY
     }
@@ -114,7 +114,7 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
     handler.removeCallbacks(stopRunnable)
     handler.postDelayed({
       val engine = tts
-      if (engine == null || AlarmRingingService.isRinging()) {
+      if (engine == null || AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy()) {
         stopSpeaking()
         return@postDelayed
       }

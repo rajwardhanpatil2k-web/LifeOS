@@ -1,8 +1,9 @@
 const { CarryForwardTask } = require("./models");
 const { chatJson } = require("./ai");
 const { LIFE_AREAS } = require("./seed/rajRoutine");
+const { TIME_RE, hhmmIST } = require("./focusBlock");
+const { parseSpokenClock } = require("./clockParse");
 
-const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DOMAINS = LIFE_AREAS.map((a) => a.key);
 
 const PARSE_SCHEMA = {
@@ -18,30 +19,12 @@ const PARSE_SCHEMA = {
   },
 };
 
-function padTime(h, m) {
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-function fallbackParse(transcript) {
+function fallbackParse(transcript, nowHHMM = hhmmIST()) {
   const raw = String(transcript || "").replace(/\s+/g, " ").trim();
-  let hour = 20;
-  let minute = 0;
-  const match = raw.match(
-    /\b(?:around|at|by|before|after)?\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/i
-  );
-  if (match) {
-    hour = Number(match[1]);
-    minute = match[2] ? Number(match[2]) : 0;
-    const mer = (match[3] || "").toLowerCase();
-    if (mer.startsWith("p") && hour < 12) hour += 12;
-    if (mer.startsWith("a") && hour === 12) hour = 0;
-    if (!mer && hour <= 7) hour += 12;
-    if (hour > 23) hour = 23;
-    if (!Number.isFinite(minute) || minute > 59) minute = 0;
-  }
+  const spokenAt = parseSpokenClock(raw, nowHHMM);
 
   let title = raw
-    .replace(/\b(i (actually )?have (a )?task of|i (need|want|have) to|please |can you |plan it|add (a )?task|remind me to)\b/gi, " ")
+    .replace(/\b(i (actually )?have (a )?task of|i (need|want|have) to|please |can you |plan it|add (a )?task|remind me (to|of|about))\b/gi, " ")
     .replace(/\b(around|at|by|before|after)\s+\d{1,2}(?::\d{2})?\s*(a\.?m\.?|p\.?m\.?)?/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -53,25 +36,37 @@ function fallbackParse(transcript) {
   let domain = "ops";
   if (/(workout|gym|run|exercise)/.test(lower)) domain = "fitness";
   else if (/(study|dsa|learn)/.test(lower)) domain = "learning";
-  else if (/(skin|face)/.test(lower)) domain = "skin";
+  else if (/(skin|face|cream)/.test(lower)) domain = "skin";
   else if (/(hair)/.test(lower)) domain = "hair";
   else if (/(sleep|water|health)/.test(lower)) domain = "health";
 
   return {
     title,
-    scheduledAt: padTime(hour, minute),
+    scheduledAt: spokenAt || "20:00",
     durationMin: 30,
     domain,
     step: title,
   };
 }
 
+function resolveScheduledAt(transcript, llmTime, nowHHMM = hhmmIST()) {
+  const spokenAt = parseSpokenClock(transcript, nowHHMM);
+  if (spokenAt) return spokenAt;
+  if (TIME_RE.test(llmTime)) return llmTime;
+  return fallbackParse(transcript, nowHHMM).scheduledAt;
+}
+
 async function parseVoiceTask(transcript) {
-  const fallback = fallbackParse(transcript);
+  const nowHHMM = hhmmIST();
+  const fallback = fallbackParse(transcript, nowHHMM);
   const parsed = await chatJson({
     system:
       "Parse a spoken life-admin request into one calendar task for today in Asia/Kolkata. " +
-      "scheduledAt must be 24-hour HH:MM. 'Around 8 PM' is 20:00. 'Morning' without a clock is 09:00. " +
+      `Current time in Asia/Kolkata is ${nowHHMM}. ` +
+      "scheduledAt must be 24-hour HH:MM. Keep the exact hour and minute they said — 'around' does not mean round the clock. " +
+      "If they name a clock without AM/PM, pick the NEXT upcoming occurrence today. " +
+      `Example: now ${nowHHMM} and 'around 9:56' is the next 09:56 or 21:56 that has not passed, never the one already behind. ` +
+      "'Around 8 PM' is 20:00. 'Morning' without a clock is 09:00. " +
       "Pick the closest domain. durationMin is a reasonable estimate, usually 20-45. " +
       "title is short and concrete. step is the first action.",
     user: String(transcript || "").trim(),
@@ -83,7 +78,7 @@ async function parseVoiceTask(transcript) {
 
   const data = parsed?.data;
   if (!data) return fallback;
-  const scheduledAt = TIME_RE.test(data.scheduledAt) ? data.scheduledAt : fallback.scheduledAt;
+  const scheduledAt = resolveScheduledAt(transcript, data.scheduledAt, nowHHMM);
   const domain = DOMAINS.includes(data.domain) ? data.domain : fallback.domain;
   const durationMin = Number.isFinite(data.durationMin) && data.durationMin > 0 ? Math.round(data.durationMin) : 30;
   const title = String(data.title || fallback.title).trim() || fallback.title;
@@ -124,10 +119,25 @@ function itemFromCarry(task) {
 async function mergeCarryForwards(user, plan) {
   const open = await CarryForwardTask.find({ userId: user._id, status: "open" });
   if (!open.length) return plan;
-  const have = new Set(plan.items.map((item) => item.originKey || item.key).filter(Boolean));
   let added = 0;
   for (const task of open) {
-    if (have.has(task.originKey)) continue;
+    const existing = plan.items.find(
+      (item) => item.originKey === task.originKey || item.key === task.originKey
+    );
+    if (existing) {
+      if (existing.status === "done") {
+        task.status = "done";
+        await task.save();
+      } else if (existing.status === "pending" && existing.scheduledAt && existing.scheduledAt !== task.scheduledAt) {
+        task.scheduledAt = existing.scheduledAt;
+        if (existing.title) task.title = existing.title;
+        if (Number.isFinite(existing.durationMin) && existing.durationMin > 0) {
+          task.durationMin = existing.durationMin;
+        }
+        await task.save();
+      }
+      continue;
+    }
     plan.items.push(itemFromCarry(task));
     added += 1;
   }
@@ -149,13 +159,25 @@ async function setCarryForwardStatus(user, item, status) {
   await CarryForwardTask.updateOne({ userId: user._id, originKey }, { status });
 }
 
+async function syncCarryForwardFields(user, item) {
+  const originKey = carryKeyOf(item);
+  if (!originKey) return;
+  const update = {};
+  if (TIME_RE.test(item.scheduledAt)) update.scheduledAt = item.scheduledAt;
+  if (item.title) update.title = item.title;
+  if (Number.isFinite(Number(item.durationMin)) && Number(item.durationMin) > 0) {
+    update.durationMin = Math.round(Number(item.durationMin));
+  }
+  if (!Object.keys(update).length) return;
+  await CarryForwardTask.updateOne({ userId: user._id, originKey }, update);
+}
+
 async function createVoiceTask(user, plan, transcript, parsedInput) {
+  const nowHHMM = hhmmIST();
   const parsed = parsedInput?.title
     ? {
         title: parsedInput.title,
-        scheduledAt: TIME_RE.test(parsedInput.scheduledAt)
-          ? parsedInput.scheduledAt
-          : (await parseVoiceTask(transcript)).scheduledAt,
+        scheduledAt: resolveScheduledAt(transcript, parsedInput.scheduledAt, nowHHMM),
         durationMin:
           Number.isFinite(parsedInput.durationMin) && parsedInput.durationMin > 0
             ? Math.round(parsedInput.durationMin)
@@ -164,7 +186,7 @@ async function createVoiceTask(user, plan, transcript, parsedInput) {
         step: String(parsedInput.step || parsedInput.title).trim() || parsedInput.title,
       }
     : await parseVoiceTask(transcript);
-  const originKey = `ai-${Date.now()}`;
+  const originKey = `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const steps = [{ key: "main", label: parsed.step, done: false }];
   await CarryForwardTask.create({
     userId: user._id,
@@ -197,9 +219,12 @@ async function createVoiceTask(user, plan, transcript, parsedInput) {
 
 module.exports = {
   TIME_RE,
+  fallbackParse,
+  resolveScheduledAt,
   parseVoiceTask,
   mergeCarryForwards,
   setCarryForwardStatus,
+  syncCarryForwardFields,
   createVoiceTask,
   carryKeyOf,
 };

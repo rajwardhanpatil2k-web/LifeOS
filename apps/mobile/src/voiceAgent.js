@@ -238,7 +238,7 @@ function meaningFromHeard(spoken, phase) {
 
   if (/\b(not now|not ready|later|snooze|busy|reject|nope|wait|hold on)\b/.test(spoken)) return "snooze";
   if (/\bno\b/.test(spoken) && !/\bnow\b/.test(spoken)) return "snooze";
-  if (/\b(ready|already|reddy|yes|yeah|yep|yup|ok|okay|start|sure|go ahead|lets go|let us go|im ready|i m ready|i am ready)\b/.test(spoken)) {
+  if (/\b(ready|already|reddy|yes|yeah|yep|yup|ok|okay|start|sure|go ahead|lets go|let us go|im ready|i m ready|i am ready|haan)\b/.test(spoken)) {
     return "ready";
   }
   return null;
@@ -274,9 +274,15 @@ export function interpretCallReplies(texts, phase, prompt) {
 function triggerMillis(scheduledAt) {
   const [hours, minutes] = String(scheduledAt || "").split(":").map(Number);
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return -1;
-  const date = new Date();
-  date.setHours(hours, minutes, 0, 0);
-  return date.getTime();
+  const dateStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const clock = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  const at = new Date(`${dateStr}T${clock}:00+05:30`).getTime();
+  return Number.isFinite(at) ? at : -1;
 }
 
 export async function syncVoiceCues(items, { enabled = true, name = "Raj" } = {}) {

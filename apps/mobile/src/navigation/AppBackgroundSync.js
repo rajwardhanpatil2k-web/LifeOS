@@ -14,6 +14,23 @@ export const navigationRef = createNavigationContainerRef();
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
+function isTaskCallRoute() {
+  if (!navigationRef.isReady()) return false;
+  try {
+    return navigationRef.getCurrentRoute()?.name === "TaskCall";
+  } catch (_e) {
+    return false;
+  }
+}
+
+async function callIsLive() {
+  try {
+    return await isTaskCallRinging();
+  } catch (_e) {
+    return false;
+  }
+}
+
 async function openWakeAlarmIfRinging() {
   if (!isWakeAlarmAvailable() || !navigationRef.isReady()) return;
   try {
@@ -24,6 +41,7 @@ async function openWakeAlarmIfRinging() {
 async function openTaskCallIfRinging() {
   if (!isTaskAlertsAvailable() || !navigationRef.isReady()) return;
   try {
+    if (isTaskCallRoute()) return;
     if (!(await isTaskCallRinging())) return;
     const active = await getActiveTaskCall();
     if (!active?.itemId) return;
@@ -58,10 +76,16 @@ export default function AppBackgroundSync() {
   useEffect(() => {
     if (!settingsHydrated || !Array.isArray(todayItems)) return undefined;
     const until = Number.isFinite(pausedUntil) && pausedUntil > Date.now() ? pausedUntil : 0;
-    const timer = setTimeout(() => {
-      if (until) stopTaskAlert().catch(() => {});
-      setTaskAlertsPausedUntil(until).catch(() => {});
-      syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
+    const timer = setTimeout(async () => {
+      try {
+        if (await callIsLive()) return;
+        if (until) stopTaskAlert().catch(() => {});
+        await setTaskAlertsPausedUntil(until).catch(() => {});
+        await syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
+      } catch (_e) {
+        if (await callIsLive()) return;
+        syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
+      }
     }, 500);
     return () => clearTimeout(timer);
   }, [settingsHydrated, todayItems, voiceAlerts, userName, pausedUntil]);
@@ -70,13 +94,15 @@ export default function AppBackgroundSync() {
     const subscription = AppState.addEventListener("change", (next) => {
       const wasBackground = appState.current.match(/inactive|background/);
       if (wasBackground && next === "active") {
-        dispatch(fetchToday());
         openWakeAlarmIfRinging();
         openTaskCallIfRinging();
+        if (!isTaskCallRoute()) dispatch(fetchToday());
       }
       appState.current = next;
     });
-    const interval = setInterval(() => dispatch(fetchToday()), REFRESH_INTERVAL_MS);
+    const interval = setInterval(() => {
+      if (!isTaskCallRoute()) dispatch(fetchToday());
+    }, REFRESH_INTERVAL_MS);
     return () => {
       subscription.remove();
       clearInterval(interval);

@@ -126,10 +126,11 @@ export async function setTaskCallUiVisible(visible) {
 
 export async function speakTaskPrompt(text) {
   if (!available || !TaskReminderModule.speakPrompt || !text) return false;
-  const spoken = TaskReminderModule.speakPrompt(String(text)).catch(() => false);
-  const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000));
-  const result = await Promise.race([spoken, timeout]);
-  if (result === "timeout") await cancelSpeakPrompt().catch(() => {});
+  try {
+    await TaskReminderModule.speakPrompt(String(text));
+  } catch (_e) {
+    return false;
+  }
   return true;
 }
 
@@ -174,8 +175,8 @@ export function subscribeTaskCallSpeech(handler) {
 export async function startTaskCallListening() {
   if (!available || !TaskReminderModule.startListening) return false;
   if (Platform.OS === "android") {
-    const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-    if (granted !== PermissionsAndroid.RESULTS.GRANTED) return false;
+    const granted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+    if (!granted) return false;
   }
   return TaskReminderModule.startListening();
 }

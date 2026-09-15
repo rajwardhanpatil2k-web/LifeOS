@@ -5,6 +5,7 @@ import { useTheme } from "../hooks/useTheme";
 import {
   getPermissionStatus,
   requestCameraAccess,
+  requestMicrophoneAccess,
   requestNotificationAccess,
   openExactAlarmSettings,
   openFullScreenIntentSettings,
@@ -33,6 +34,13 @@ export default function PermissionsScreen() {
     if (status?.camera) return;
     const granted = await requestCameraAccess();
     if (!granted && status && !status.cameraCanAsk) await openAppSettings();
+    await refresh();
+  };
+
+  const onMicrophone = async () => {
+    if (status?.microphone) return;
+    const granted = await requestMicrophoneAccess();
+    if (!granted) await openAppSettings();
     await refresh();
   };
 
@@ -76,6 +84,14 @@ export default function PermissionsScreen() {
           detail="Scan the wake QR to silence the morning alarm."
           allowed={status?.camera}
           onPress={onCamera}
+        />
+        <PermissionRow
+          styles={styles}
+          colors={colors}
+          title="Microphone"
+          detail="Needed so the task call can hear Ready / Not now after you answer."
+          allowed={status?.microphone}
+          onPress={onMicrophone}
         />
         <PermissionRow
           styles={styles}

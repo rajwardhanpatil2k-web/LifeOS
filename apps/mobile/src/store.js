@@ -4,7 +4,9 @@ import { api } from "./api";
 export const fetchToday = createAsyncThunk("today/fetch", async () => api("/api/today"));
 export const fetchWeek = createAsyncThunk("today/week", async () => api("/api/week"));
 export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPayload) => {
-  const itemId = typeof itemIdOrPayload === "string" ? itemIdOrPayload : itemIdOrPayload.itemId;
+  const itemId = String(
+    (typeof itemIdOrPayload === "string" ? itemIdOrPayload : itemIdOrPayload?.itemId) || ""
+  );
   const source = typeof itemIdOrPayload === "object" ? itemIdOrPayload.source : undefined;
   return api(`/api/items/${itemId}/complete`, {
     method: "POST",
@@ -84,12 +86,20 @@ export const updateSettings = createAsyncThunk("settings/update", async (setting
   api("/api/settings", { method: "PUT", body: JSON.stringify(settings) })
 );
 
+function sameItem(left, right) {
+  if (!left || !right) return false;
+  if (left._id && right._id && String(left._id) === String(right._id)) return true;
+  if (left.originKey && right.originKey && left.originKey === right.originKey) return true;
+  if (left.key && right.key && left.key === right.key) return true;
+  return false;
+}
+
 function applyItemUpdate(state, action) {
   if (!state.data) return;
   state.data.score = action.payload.score;
   state.data.next = action.payload.next;
   state.data.items = state.data.items.map((item) =>
-    item._id === action.payload.item._id ? action.payload.item : item
+    sameItem(item, action.payload.item) ? action.payload.item : item
   );
 }
 
@@ -109,7 +119,7 @@ function applyItemUpdateToDay(state, action) {
   state.data.score = action.payload.score;
   state.data.next = action.payload.next;
   state.data.items = state.data.items.map((item) =>
-    item._id === action.payload.item._id ? action.payload.item : item
+    sameItem(item, action.payload.item) ? action.payload.item : item
   );
 }
 

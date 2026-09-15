@@ -9,11 +9,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
-import android.media.Ringtone
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -21,16 +21,14 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import com.raj.lifeos.R
 import com.raj.lifeos.wakealarm.AlarmRingingService
-import java.util.Locale
 
-// Incoming task call: looping ringtone + vibration + spoken cue until the
-// user answers, rejects, or the unanswered timeout snoozes it.
-class TaskAlertService : Service(), TextToSpeech.OnInitListener {
+// Incoming task call: looping ringtone + vibration until the user answers,
+// rejects, or the unanswered timeout snoozes it. TTS happens after Answer
+// from the JS/native module so the ring is never cut off by speech.
+class TaskAlertService : Service() {
   companion object {
     const val CHANNEL_ID = "lifeos-task-call"
     const val NOTIFICATION_ID = 5211
@@ -66,12 +64,9 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     }
   }
 
-  private var ringtone: Ringtone? = null
+  private var player: MediaPlayer? = null
   private var vibrator: Vibrator? = null
   private var wakeLock: PowerManager.WakeLock? = null
-  private var tts: TextToSpeech? = null
-  private var ttsReady = false
-  private var pendingSpeech: String? = null
   private var alertLevel = "normal"
   private var title = "Life OS"
   private var itemId = ""
@@ -81,6 +76,7 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
   private var domain = ""
   private val handler = Handler(Looper.getMainLooper())
   private var unansweredRunnable: Runnable? = null
+  private var ringtoneWatch: Runnable? = null
   private var finished = false
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -95,11 +91,13 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
       return START_STICKY
     }
     if (intent?.action == ACTION_HIDE_NOTIFICATION) {
-      dismissCallNotification()
+      if (TaskCallState.inSession) postSessionNotification()
       return START_STICKY
     }
     if (intent?.action == ACTION_SHOW_NOTIFICATION) {
-      if (!finished && TaskCallState.ringing) postCallNotification()
+      if (finished) return START_STICKY
+      if (TaskCallState.ringing) postCallNotification()
+      else postSessionNotification()
       return START_STICKY
     }
     if (AlarmRingingService.isRinging()) {
@@ -107,29 +105,44 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
       return START_NOT_STICKY
     }
 
-    val saved = TaskCallState.read(this)
-    itemId = intent?.getStringExtra(TaskCallIntents.EXTRA_ID).orEmpty().ifBlank { saved?.id.orEmpty() }
-    alertLevel = intent?.getStringExtra(TaskCallIntents.EXTRA_ALERT_LEVEL)
-      ?: saved?.alertLevel
-      ?: "normal"
-    title = intent?.getStringExtra(TaskCallIntents.EXTRA_TITLE)?.trim().orEmpty()
-      .ifBlank { saved?.title }
-      .orEmpty()
-      .ifBlank { "Life OS reminder" }
-    spokenText = intent?.getStringExtra(TaskCallIntents.EXTRA_TEXT)?.trim().orEmpty()
-      .ifBlank { saved?.spokenText.orEmpty() }
-    pendingSpeech = spokenText.ifBlank { null }
-    phase = intent?.getStringExtra(TaskCallIntents.EXTRA_PHASE)
-      ?: saved?.phase
-      ?: TaskCallState.PHASE_START
-    durationMin = intent?.getIntExtra(TaskCallIntents.EXTRA_DURATION, saved?.durationMin ?: 0) ?: 0
-    domain = intent?.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty().ifBlank { saved?.domain.orEmpty() }
+    val isNewCall = intent?.hasExtra(TaskCallIntents.EXTRA_ID) == true
+    if (!isNewCall) {
+      restoreFromState()
+      if (itemId.isBlank()) {
+        stopSelf()
+        return START_NOT_STICKY
+      }
+      if (TaskCallState.inSession && !TaskCallState.ringing) {
+        postSessionNotification()
+        return START_STICKY
+      }
+    } else {
+      val callIntent = intent!!
+      val saved = TaskCallState.read(this)
+      itemId = callIntent.getStringExtra(TaskCallIntents.EXTRA_ID).orEmpty().ifBlank { saved?.id.orEmpty() }
+      alertLevel = callIntent.getStringExtra(TaskCallIntents.EXTRA_ALERT_LEVEL)
+        ?: saved?.alertLevel
+        ?: "normal"
+      title = callIntent.getStringExtra(TaskCallIntents.EXTRA_TITLE)?.trim().orEmpty()
+        .ifBlank { saved?.title }
+        .orEmpty()
+        .ifBlank { "Life OS reminder" }
+      spokenText = callIntent.getStringExtra(TaskCallIntents.EXTRA_TEXT)?.trim().orEmpty()
+        .ifBlank { saved?.spokenText.orEmpty() }
+      phase = callIntent.getStringExtra(TaskCallIntents.EXTRA_PHASE)
+        ?: saved?.phase
+        ?: TaskCallState.PHASE_START
+      durationMin = callIntent.getIntExtra(TaskCallIntents.EXTRA_DURATION, saved?.durationMin ?: 0)
+      domain = callIntent.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty().ifBlank { saved?.domain.orEmpty() }
+    }
+
     if (itemId.isBlank()) {
       stopSelf()
       return START_NOT_STICKY
     }
 
     TaskCallState.ringing = true
+    TaskCallState.inSession = false
     TaskCallState.setActive(
       this,
       TaskCallState.ActiveCall(itemId, title, spokenText, alertLevel, phase, durationMin, domain)
@@ -140,82 +153,80 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     postCallNotification()
     startRingtone()
     startVibration()
-    handler.post { TaskCallIntents.launchScreen(this, itemId, phase, title, alertLevel, durationMin, domain) }
-
-    if (pendingSpeech != null) {
-      if (tts == null) tts = TextToSpeech(applicationContext, this)
-      else if (ttsReady) speakPending()
+    if (isNewCall) {
+      handler.post { TaskCallIntents.launchScreen(this, itemId, phase, title, alertLevel, durationMin, domain) }
     }
     scheduleUnansweredTimeout()
     return START_STICKY
   }
 
-  override fun onInit(status: Int) {
-    if (status != TextToSpeech.SUCCESS) return
-    val engine = tts ?: return
-    try {
-      engine.language = Locale("en", "IN")
-    } catch (_: Exception) {
-      engine.language = Locale.US
+  private fun ringtoneUri(): Uri =
+    RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_RINGTONE)
+      ?: RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
+      ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+
+  private fun isPlayerPlaying(): Boolean =
+    try { player?.isPlaying == true } catch (_: Exception) { false }
+
+  private fun startRingtone() {
+    if (finished || !TaskCallState.ringing) return
+    if (isPlayerPlaying()) {
+      armRingtoneWatch()
+      return
     }
-    engine.setSpeechRate(0.90f)
-    engine.setPitch(0.97f)
-    engine.setAudioAttributes(
-      AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .build()
-    )
-    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-      override fun onStart(utteranceId: String?) {
-        handler.post { stopRingtoneOnly() }
-      }
-      override fun onDone(utteranceId: String?) {
+    stopRingtoneOnly()
+    try {
+      val mp = MediaPlayer()
+      mp.setAudioAttributes(
+        AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_ALARM)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+          .setLegacyStreamType(AudioManager.STREAM_ALARM)
+          .build()
+      )
+      mp.isLooping = true
+      mp.setDataSource(this, ringtoneUri())
+      mp.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
+      mp.setOnErrorListener { _, _, _ ->
         handler.post {
           if (!finished && TaskCallState.ringing) startRingtone()
         }
+        true
       }
-      @Deprecated("Deprecated in Java")
-      override fun onError(utteranceId: String?) {}
-      override fun onError(utteranceId: String?, errorCode: Int) {}
-    })
-    ttsReady = true
-    speakPending()
-  }
-
-  private fun speakPending() {
-    val text = pendingSpeech ?: return
-    pendingSpeech = null
-    handler.postDelayed({
-      val engine = tts ?: return@postDelayed
-      val params = Bundle()
-      val utteranceId = "task-call-${System.currentTimeMillis()}"
-      params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-      engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-    }, 400L)
-  }
-
-  private fun startRingtone() {
-    try {
-      val uri: Uri = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_RINGTONE)
-        ?: RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
-        ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-      ringtone = RingtoneManager.getRingtone(this, uri)
-      ringtone?.audioAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_ALARM)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-        .build()
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        ringtone?.isLooping = true
+      mp.setOnCompletionListener { media ->
+        if (finished || !TaskCallState.ringing) return@setOnCompletionListener
+        try {
+          media.isLooping = true
+          media.start()
+        } catch (_: Exception) {
+          startRingtone()
+        }
       }
-      ringtone?.play()
+      mp.prepare()
+      mp.start()
+      player = mp
     } catch (_: Exception) {
+      player = null
     }
+    armRingtoneWatch()
+  }
+
+  private fun armRingtoneWatch() {
+    ringtoneWatch?.let { handler.removeCallbacks(it) }
+    ringtoneWatch = Runnable {
+      if (finished || !TaskCallState.ringing) return@Runnable
+      if (!isPlayerPlaying()) startRingtone()
+      else handler.postDelayed(ringtoneWatch!!, 1200L)
+    }
+    handler.postDelayed(ringtoneWatch!!, 1200L)
   }
 
   private fun stopRingtoneOnly() {
-    try { ringtone?.stop() } catch (_: Exception) {}
-    ringtone = null
+    ringtoneWatch?.let { handler.removeCallbacks(it) }
+    ringtoneWatch = null
+    try { player?.stop() } catch (_: Exception) {}
+    try { player?.release() } catch (_: Exception) {}
+    player = null
   }
 
   private fun startVibration() {
@@ -262,14 +273,25 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     finishAlert(clearState = true, parkQueue = true)
   }
 
+  private fun restoreFromState() {
+    val saved = TaskCallState.read(this) ?: return
+    itemId = saved.id
+    title = saved.title.ifBlank { title }
+    spokenText = saved.spokenText
+    alertLevel = saved.alertLevel
+    phase = saved.phase
+    durationMin = saved.durationMin
+    domain = saved.domain
+  }
+
   private fun silenceAudio() {
     unansweredRunnable?.let { handler.removeCallbacks(it) }
     unansweredRunnable = null
+    TaskCallState.ringing = false
+    TaskCallState.inSession = true
     stopRingtoneOnly()
     try { vibrator?.cancel() } catch (_: Exception) {}
-    try { tts?.stop() } catch (_: Exception) {}
-    TaskCallState.ringing = false
-    dismissCallNotification()
+    postSessionNotification()
   }
 
   private fun finishAlert(clearState: Boolean, parkQueue: Boolean = false) {
@@ -279,17 +301,13 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     stopRingtoneOnly()
     try { vibrator?.cancel() } catch (_: Exception) {}
     vibrator = null
-    try { tts?.stop() } catch (_: Exception) {}
-    try { tts?.shutdown() } catch (_: Exception) {}
-    tts = null
-    ttsReady = false
-    pendingSpeech = null
     try {
       wakeLock?.let { if (it.isHeld) it.release() }
     } catch (_: Exception) {}
     wakeLock = null
     TaskCallState.ringing = false
     if (parkQueue) TaskCallQueue.parkAll(this, TaskReminderScheduler.QUEUE_RELEASE_MS)
+    else TaskCallQueue.releaseNext(this)
     if (clearState) TaskCallState.clear(this)
     else TaskCallState.inSession = false
     dismissCallNotification()
@@ -297,11 +315,19 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
   }
 
   private fun postCallNotification() {
+    startForegroundNotification(buildNotification(incoming = true))
+  }
+
+  private fun postSessionNotification() {
+    startForegroundNotification(buildNotification(incoming = false))
+  }
+
+  private fun startForegroundNotification(notification: Notification) {
     try {
       if (Build.VERSION.SDK_INT >= 34) {
-        startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
       } else {
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startForeground(NOTIFICATION_ID, notification)
       }
     } catch (_: Exception) {
     }
@@ -368,39 +394,51 @@ class TaskAlertService : Service(), TextToSpeech.OnInitListener {
     )
   }
 
-  private fun buildNotification(): Notification {
+  private fun buildNotification(incoming: Boolean): Notification {
     val openPending = PendingIntent.getActivity(
       this,
       5212,
-      TaskCallIntents.screenIntent(this, itemId, phase, title, alertLevel, durationMin, domain),
+      TaskCallIntents.screenIntent(
+        this, itemId, phase, title, alertLevel, durationMin, domain,
+        pickedUp = !incoming
+      ),
       PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag()
     )
-    val subtitle = if (phase == TaskCallState.PHASE_END) {
+    val subtitle = if (!incoming) {
+      "Call in progress — tap to return."
+    } else if (phase == TaskCallState.PHASE_END) {
       "Time's up — answer if you finished, or reject to remind you in 15 minutes."
     } else {
       "Incoming task call — answer if you're ready, or reject to snooze 5 minutes."
     }
 
-    return NotificationCompat.Builder(this, CHANNEL_ID)
+    val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle(title)
       .setContentText(subtitle)
       .setSmallIcon(R.drawable.ic_stat_lifeos)
       .setColor(android.graphics.Color.parseColor("#D4AF6A"))
-      .setPriority(NotificationCompat.PRIORITY_MAX)
       .setCategory(NotificationCompat.CATEGORY_CALL)
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-      .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
       .setOngoing(true)
       .setAutoCancel(false)
-      .setFullScreenIntent(openPending, true)
       .setContentIntent(openPending)
-      .addAction(0, "Reject", actionIntent(TaskCallActionReceiver.ACTION_REJECT))
-      .addAction(0, "Answer", actionIntent(TaskCallActionReceiver.ACTION_ANSWER))
-      .build()
+      .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+      .setPriority(NotificationCompat.PRIORITY_MAX)
+
+    if (incoming) {
+      builder
+        .setFullScreenIntent(openPending, true)
+        .addAction(0, "Reject", actionIntent(TaskCallActionReceiver.ACTION_REJECT))
+        .addAction(0, "Answer", actionIntent(TaskCallActionReceiver.ACTION_ANSWER))
+    }
+    return builder.build()
   }
 
   override fun onDestroy() {
-    if (!finished) finishAlert(clearState = false, parkQueue = false)
+    ringtoneWatch?.let { handler.removeCallbacks(it) }
+    try { player?.stop() } catch (_: Exception) {}
+    try { player?.release() } catch (_: Exception) {}
+    player = null
     super.onDestroy()
   }
 }

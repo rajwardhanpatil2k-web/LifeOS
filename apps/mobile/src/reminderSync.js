@@ -6,13 +6,13 @@ import { syncVoiceCues, cancelVoiceCues, isVoiceAgentAvailable } from "./voiceAg
 // TaskAlertService (looping call + TTS) is the primary path; Expo notifications
 // are a visual backup on the lock screen.
 export async function syncDayReminders(items, { voiceAlerts = true, name = "Raj", pausedUntil = 0 } = {}) {
-  await syncTodayReminders(items, { name, pausedUntil });
-
   if (isTaskAlertsAvailable()) {
     await syncTaskAlerts(items, { voiceAlerts: voiceAlerts !== false, name, pausedUntil });
     if (isVoiceAgentAvailable()) await cancelVoiceCues().catch(() => {});
     return;
   }
+
+  await syncTodayReminders(items, { name, pausedUntil });
 
   if (isVoiceAgentAvailable()) {
     await syncVoiceCues(items, { enabled: voiceAlerts !== false, name });

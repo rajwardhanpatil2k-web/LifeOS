@@ -25,6 +25,11 @@ async function requestAndroidPermission(permission) {
   }
 }
 
+export async function requestMicrophoneAccess() {
+  if (Platform.OS !== "android") return true;
+  return requestAndroidPermission(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+}
+
 export async function requestCameraAccess() {
   if (Platform.OS === "android") {
     await requestAndroidPermission(PermissionsAndroid.PERMISSIONS.CAMERA);
@@ -53,9 +58,14 @@ export async function getPermissionStatus() {
   const fullScreen = await canUseFullScreenIntent().catch(() => true);
   const battery = await isIgnoringBatteryOptimizations().catch(() => true);
 
+  const mic = Platform.OS === "android"
+    ? await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO).catch(() => false)
+    : true;
+
   return {
     camera: !!camera?.granted,
     cameraCanAsk: camera?.canAskAgain !== false,
+    microphone: !!mic,
     notifications: !!notifications,
     exactAlarms: !!exactAlarms,
     fullScreen: !!fullScreen,
@@ -70,6 +80,7 @@ export async function getPermissionStatus() {
 export async function requestStartupPermissionDialogs() {
   if (AppState.currentState !== "active") return;
   await requestNotificationAccess();
+  await requestMicrophoneAccess();
   await requestCameraAccess();
 }
 

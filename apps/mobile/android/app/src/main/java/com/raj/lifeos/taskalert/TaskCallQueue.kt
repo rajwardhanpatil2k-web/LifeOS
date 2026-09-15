@@ -10,7 +10,7 @@ object TaskCallQueue {
 
   fun enqueue(context: Context, reminder: TaskReminderScheduler.Reminder) {
     if (reminder.id.isBlank()) return
-    val next = load(context).filter { it.id != reminder.id }.toMutableList()
+    val next = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
     next.add(reminder)
     save(context, next)
   }

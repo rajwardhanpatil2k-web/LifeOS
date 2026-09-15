@@ -3,11 +3,10 @@ import { AppState, BackHandler, Pressable, StyleSheet, Text, View } from "react-
 import { Ionicons } from "@expo/vector-icons";
 import { useDispatch, useSelector } from "react-redux";
 import { colors, domainMeta } from "../theme";
-import { completeItem, markItemReady, remindLaterItem, snoozeItem } from "../store";
+import { completeItem, fetchToday, markItemReady, remindLaterItem, snoozeItem } from "../store";
 import {
   cancelSpeakPrompt,
   clearTaskCallOverride,
-  isTaskCallRinging,
   setTaskCallUiVisible,
   silenceTaskAlert,
   snoozeTaskCall,
@@ -37,8 +36,9 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   const itemId = params.itemId ? String(params.itemId) : "";
   const phase = params.phase === "end" ? "end" : "start";
   const todayItems = useSelector((s) => s.today.data?.items || []);
-  const focusPaused = useSelector((s) => !!s.today.data?.focusBlock?.active);
-  const item = todayItems.find((row) => String(row._id) === itemId);
+  const item = todayItems.find((row) =>
+    String(row._id) === itemId || row.originKey === itemId || row.key === itemId
+  );
   const title = item?.title || params.title || "Task";
   const domain = item?.domain || params.domain || "";
   const scheduledAt = item?.scheduledAt || "";
@@ -56,25 +56,29 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   const voicePhaseRef = useRef(voicePhase);
   voicePhaseRef.current = voicePhase;
   const listenTimer = useRef(null);
-  const listenTries = useRef(0);
+  const confirmStarted = useRef(false);
   const stageRef = useRef(stage);
-  const mountedAt = useRef(Date.now());
   stageRef.current = stage;
 
   const hangUp = useCallback(() => {
     sessionRef.current += 1;
     stopTaskCallListening().catch(() => {});
     cancelSpeakPrompt().catch(() => {});
-    stopTaskAlert().catch(() => {});
-    setTaskCallUiVisible(false).catch(() => {});
     setVoicePhase("idle");
     if (finished.current) return;
     finished.current = true;
-    if (navigation.canGoBack()) navigation.goBack();
-    else navigation.reset({ index: 0, routes: [{ name: "Main" }] });
+    const goMain = () => {
+      if (goMain.done) return;
+      goMain.done = true;
+      try {
+        navigation.reset({ index: 0, routes: [{ name: "Main" }] });
+      } catch (_e) {
+        if (navigation.canGoBack()) navigation.goBack();
+      }
+    };
+    stopTaskAlert().catch(() => {}).finally(goMain);
+    setTimeout(goMain, 900);
   }, [navigation]);
-
-  const leave = hangUp;
 
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => true);
@@ -86,53 +90,14 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     const sub = AppState.addEventListener("change", (next) => {
       if (finished.current) return;
       if (next === "active") setTaskCallUiVisible(true).catch(() => {});
-      else if (stageRef.current === "ringing") setTaskCallUiVisible(false).catch(() => {});
     });
-    return () => {
-      sub.remove();
-      if (!finished.current && stageRef.current === "ringing") {
-        setTaskCallUiVisible(false).catch(() => {});
-      }
-    };
+    return () => sub.remove();
   }, []);
 
   useEffect(() => {
     if (!item) return;
     if (item.status === "done" || item.status === "skipped") hangUp();
   }, [item, hangUp]);
-
-  useEffect(() => {
-    if (!focusPaused || finished.current) return;
-    stopTaskAlert().catch(() => {});
-    leave();
-  }, [focusPaused, leave]);
-
-  useEffect(() => {
-    if (stage !== "ringing") return undefined;
-    const interval = setInterval(async () => {
-      try {
-        if (Date.now() - mountedAt.current < 2500) return;
-        if (!(await isTaskCallRinging()) && !finished.current && stageRef.current === "ringing") {
-          if (focusPaused) {
-            leave();
-            return;
-          }
-          if (!isPreview && itemId) {
-            try {
-              if (phase === "end") dispatch(remindLaterItem({ itemId, minutes: END_FOLLOWUP_MIN }));
-              else dispatch(snoozeItem({ itemId, minutes: START_SNOOZE_MIN }));
-            } catch (_e) {
-              // native already snoozed
-            }
-          }
-          leave();
-        }
-      } catch (_e) {
-        // native module missing in Expo Go
-      }
-    }, 900);
-    return () => clearInterval(interval);
-  }, [leave, stage, focusPaused, dispatch, itemId, isPreview, phase]);
 
   useEffect(() => {
     return () => {
@@ -143,53 +108,58 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   const beginListening = useCallback(async (session) => {
     if (finished.current || session !== sessionRef.current) return;
+    if (stageRef.current !== "confirm") return;
     setHeard("");
+    setVoicePhase("listening");
     try {
       await startTaskCallListening();
     } catch (_e) {
-      // buttons still work if the mic is denied
+      listenTimer.current = setTimeout(() => {
+        if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
+      }, 900);
     }
   }, []);
 
   useEffect(() => {
     if (stage !== "confirm") return undefined;
+    if (confirmStarted.current) return undefined;
+    confirmStarted.current = true;
     const session = sessionRef.current;
-    let cancelled = false;
-    stopTaskCallListening().catch(() => {});
     const prompt = phase === "end" ? composeCompletePrompt({ title }) : composeReadyPrompt({ title });
     promptRef.current = prompt;
     setHeard("");
-    listenTries.current = 0;
     setVoicePhase("speaking");
     (async () => {
       await silenceTaskAlert().catch(() => {});
-      if (cancelled || finished.current || session !== sessionRef.current) return;
+      if (finished.current || session !== sessionRef.current) return;
       await speakTaskPrompt(prompt).catch(() => {});
-      if (cancelled || finished.current || session !== sessionRef.current) return;
+      if (finished.current || session !== sessionRef.current) return;
       await new Promise((resolve) => {
-        listenTimer.current = setTimeout(resolve, 750);
+        listenTimer.current = setTimeout(resolve, 1100);
       });
-      if (cancelled || finished.current || session !== sessionRef.current) return;
-      setVoicePhase("listening");
+      if (finished.current || session !== sessionRef.current) return;
       await beginListening(session);
     })();
-    return () => {
-      cancelled = true;
-      if (listenTimer.current) clearTimeout(listenTimer.current);
-    };
-  }, [beginListening, phase, stage, title]);
+    // Speak/listen once per pickup. Re-running when today data refreshes
+    // cancels TTS and leaves the call silent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [beginListening, stage]);
 
   const enterConfirm = useCallback(() => {
-    if (finished.current || stageRef.current === "confirm") return;
+    if (finished.current) return;
+    silenceTaskAlert().catch(() => {});
+    if (stageRef.current === "confirm") return;
     stageRef.current = "confirm";
     setStage("confirm");
-    silenceTaskAlert().catch(() => {});
   }, []);
 
-  const rejectCall = useCallback((overrideMinutes) => {
-    if (busy || finished.current) return;
+  useEffect(() => {
+    if (truthyParam(params.pickedUp)) enterConfirm();
+  }, [enterConfirm, params.pickedUp]);
+
+  const rejectCall = useCallback(async (overrideMinutes) => {
+    if (finished.current) return;
     setBusy(true);
-    hangUp();
     const requested = Number(overrideMinutes) > 0
       ? Number(overrideMinutes)
       : phase === "end"
@@ -199,36 +169,43 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     const minutes = resolved.minutes;
     const payload = item || { _id: itemId, title, domain, durationMin, alertLevel: params.alertLevel };
     snoozeTaskCall(payload, { phase, minutes, items: todayItems }).catch(() => {});
-    if (isPreview) return;
-    if (phase === "end") dispatch(remindLaterItem({ itemId, minutes }));
-    else dispatch(snoozeItem({ itemId, minutes }));
-  }, [busy, dispatch, domain, durationMin, hangUp, item, itemId, isPreview, params.alertLevel, phase, title, todayItems]);
-
-  const acceptReady = useCallback(() => {
-    if (busy || finished.current) return;
-    setBusy(true);
+    if (!isPreview && itemId) {
+      try {
+        if (phase === "end") await dispatch(remindLaterItem({ itemId, minutes })).unwrap();
+        else await dispatch(snoozeItem({ itemId, minutes })).unwrap();
+      } catch (_e) {}
+    }
     hangUp();
-    if (isPreview) return;
-    dispatch(markItemReady(itemId))
-      .unwrap()
-      .then(() => clearTaskCallOverride(itemId))
-      .catch(() => {});
-  }, [busy, dispatch, hangUp, itemId, isPreview]);
+  }, [dispatch, domain, durationMin, hangUp, item, itemId, isPreview, params.alertLevel, phase, title, todayItems]);
 
-  const acceptComplete = useCallback(() => {
-    if (busy || finished.current) return;
+  const acceptReady = useCallback(async () => {
+    if (finished.current) return;
     setBusy(true);
+    if (!isPreview && itemId) {
+      try {
+        await dispatch(markItemReady(itemId)).unwrap();
+        await clearTaskCallOverride(itemId);
+      } catch (_e) {}
+    }
     hangUp();
-    if (isPreview) return;
-    dispatch(completeItem({ itemId, source: "task_call" }))
-      .unwrap()
-      .then(() => clearTaskCallOverride(itemId))
-      .catch(() => {});
-  }, [busy, dispatch, hangUp, itemId, isPreview]);
+  }, [dispatch, hangUp, itemId, isPreview]);
+
+  const acceptComplete = useCallback(async () => {
+    if (finished.current) return;
+    setBusy(true);
+    if (!isPreview && itemId) {
+      try {
+        await dispatch(completeItem({ itemId, source: "task_call" })).unwrap();
+        await clearTaskCallOverride(itemId);
+        dispatch(fetchToday());
+      } catch (_e) {}
+    }
+    hangUp();
+  }, [dispatch, hangUp, itemId, isPreview]);
 
   useEffect(() => {
     return subscribeTaskCallSpeech((event) => {
-      if (stageRef.current !== "confirm" || busy || finished.current) return;
+      if (stageRef.current !== "confirm" || finished.current) return;
       if (event?.type === "ready") {
         setVoicePhase("listening");
         return;
@@ -238,19 +215,13 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       if (event?.type === "partial" || event?.type === "result") setHeard(text);
       if (event?.type === "error") {
         if (voicePhaseRef.current === "speaking") return;
-        if (listenTries.current >= 3) {
-          setVoicePhase("idle");
-          return;
-        }
-        listenTries.current += 1;
         listenTimer.current = setTimeout(() => {
           if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
-        }, 650);
+        }, 800);
         return;
       }
       if (event?.type !== "result") return;
       if (voicePhaseRef.current === "speaking") return;
-      listenTries.current = 0;
       const meaning = interpretCallReplies(
         [text, ...alternatives],
         phase === "end" ? "complete" : "ready",
@@ -328,7 +299,12 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
 function CallButton({ color, icon, label, onPress, disabled, iconStyle }) {
   return (
-    <Pressable style={styles.action} onPressIn={disabled ? undefined : onPress} disabled={disabled}>
+    <Pressable
+      style={styles.action}
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={16}
+    >
       <View style={[styles.actionCircle, { backgroundColor: color, opacity: disabled ? 0.55 : 1 }]}>
         <Ionicons name={icon} size={28} color="#0a0b0d" style={iconStyle} />
       </View>

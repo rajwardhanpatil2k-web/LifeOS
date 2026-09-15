@@ -40,9 +40,9 @@ object TaskReminderScheduler {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
       .putLong(KEY_PAUSED_UNTIL, until)
       .apply()
-    TaskAlertService.stop(context)
-    TaskCallQueue.clear(context)
     if (until <= 0L) return
+    if (!TaskCallState.busy()) TaskAlertService.stop(context)
+    TaskCallQueue.clear(context)
     cancelArmed(context)
     val kept = load(context).filter { it.at >= until && it.at > now + 1_000L }
     save(context, kept)
@@ -97,7 +97,7 @@ object TaskReminderScheduler {
     if (reminder.at <= now + 1_000L) return
     if (pause > now && reminder.at < pause) return
 
-    val reminders = load(context).filter { it.id != reminder.id }.toMutableList()
+    val reminders = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
     reminders.add(reminder)
     save(context, reminders)
     arm(context, reminder)
@@ -127,10 +127,10 @@ object TaskReminderScheduler {
     val gated = if (pause > now) maxOf(desired, pause) else desired
     val at = nextFreeAt(context, gated, base.id)
     val reminder = base.copy(at = at)
-    val overrides = loadOverrides(context).filter { it.id != reminder.id }.toMutableList()
+    val overrides = loadOverrides(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
     overrides.add(reminder)
     saveOverrides(context, overrides)
-    val reminders = load(context).filter { it.id != reminder.id }.toMutableList()
+    val reminders = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
     reminders.add(reminder)
     save(context, reminders)
     arm(context, reminder)
@@ -142,8 +142,9 @@ object TaskReminderScheduler {
 
   fun cancel(context: Context, id: String) {
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val existing = load(context).find { it.id == id }
-    if (existing != null) am.cancel(operation(context, existing))
+    for (existing in load(context).filter { it.id == id }) {
+      am.cancel(operation(context, existing))
+    }
     save(context, load(context).filter { it.id != id })
     saveOverrides(context, loadOverrides(context).filter { it.id != id })
   }
@@ -201,10 +202,11 @@ object TaskReminderScheduler {
     intent.putExtra(TaskCallIntents.EXTRA_DOMAIN, reminder.domain)
     val flags = PendingIntent.FLAG_UPDATE_CURRENT or
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
-    return PendingIntent.getBroadcast(context, requestCode(reminder.id), intent, flags)
+    return PendingIntent.getBroadcast(context, requestCode(reminder.id, reminder.phase), intent, flags)
   }
 
-  private fun requestCode(id: String): Int = REQUEST_BASE or (id.hashCode() and 0x00FFFFFF)
+  private fun requestCode(id: String, phase: String): Int =
+    REQUEST_BASE or ((id + ":" + phase).hashCode() and 0x00FFFFFF)
 
   private fun load(context: Context): List<Reminder> = loadList(context, KEY_REMINDERS)
 

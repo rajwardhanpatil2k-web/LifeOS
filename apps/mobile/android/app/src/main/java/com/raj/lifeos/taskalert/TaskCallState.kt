@@ -28,7 +28,6 @@ object TaskCallState {
   )
 
   fun setActive(context: Context, call: ActiveCall) {
-    inSession = true
     val obj = JSONObject()
     obj.put("id", call.id)
     obj.put("title", call.title)

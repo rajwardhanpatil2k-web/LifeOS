@@ -1,5 +1,5 @@
 import * as Notifications from "expo-notifications";
-import { AppState, Platform } from "react-native";
+import { Platform } from "react-native";
 import { durationOf } from "./taskCallConfig";
 import { formatClock12 } from "./formatTime";
 import { planTaskCalls } from "./taskCallPlanner";
@@ -13,28 +13,28 @@ import { planTaskCalls } from "./taskCallPlanner";
 // like a normal escalating notification.
 const CHANNELS = {
   info: {
-    id: "lifeos-info-v2",
+    id: "lifeos-info-v3",
     name: "Life OS · Info",
     importance: Notifications.AndroidImportance.DEFAULT,
     vibrationPattern: [0, 100],
     bypassDnd: false,
   },
   normal: {
-    id: "lifeos-normal-v2",
+    id: "lifeos-normal-v3",
     name: "Life OS · Reminders",
     importance: Notifications.AndroidImportance.HIGH,
     vibrationPattern: [0, 200, 100, 200],
     bypassDnd: false,
   },
   important: {
-    id: "lifeos-important-v2",
+    id: "lifeos-important-v3",
     name: "Life OS · Important",
     importance: Notifications.AndroidImportance.HIGH,
     vibrationPattern: [0, 300, 150, 300, 150, 300],
     bypassDnd: false,
   },
   non_negotiable: {
-    id: "lifeos-nonneg-v2",
+    id: "lifeos-nonneg-v3",
     name: "Life OS · Non-negotiable",
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
@@ -72,9 +72,8 @@ function configureHandler() {
     handleNotification: async (notification) => {
       const data = notification.request.content.data || {};
       const isTaskCall = data.kind === "task_call" || !!data.phase;
-      const appOpen = AppState.currentState === "active";
-      if (isTaskCall && appOpen) {
-        return { shouldShowAlert: false, shouldPlaySound: false, shouldSetBadge: false };
+      if (isTaskCall) {
+        return { shouldShowAlert: true, shouldPlaySound: false, shouldSetBadge: false };
       }
       return { shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false };
     },
@@ -95,7 +94,7 @@ export async function ensureNotificationSetup() {
           vibrationPattern: channel.vibrationPattern,
           bypassDnd: channel.bypassDnd,
           lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
-          sound: "default",
+          sound: null,
           enableVibrate: true,
           lightColor: "#d4af6a",
         })
@@ -159,7 +158,7 @@ export async function syncTodayReminders(items, { name = "Raj", pausedUntil = 0 
             durationMin: durationOf(item),
             spokenText: reminder.spokenText,
           },
-          sound: "default",
+          sound: null,
           interruptionLevel: INTERRUPTION_LEVEL[level],
           ...(Platform.OS === "android"
             ? { priority: ANDROID_PRIORITY[level], vibrate: channel.vibrationPattern }

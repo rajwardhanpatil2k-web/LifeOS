@@ -4,6 +4,7 @@ const {
   applyCatchUp,
   startFocusBlock,
   resumeFocusBlock,
+  expireFocusBlockIfNeeded,
   CATCH_UP_GAP_MS,
   istDate,
 } = require("./focusBlock");
@@ -98,5 +99,21 @@ describe("startFocusBlock", () => {
     assert.equal(raj.focusBlock.active, true);
     assert.equal(raj.focusBlock.reason, "cutting hair");
     assert.equal(result.until.getTime(), now.getTime() + 90 * 60 * 1000);
+  });
+});
+
+describe("expireFocusBlockIfNeeded", () => {
+  it("runs catch-up when a pause ends without an explicit resume", () => {
+    const workout = item({ key: "workout", title: "Workout", scheduledAt: "17:00" });
+    const later = item({ key: "study", title: "Study", scheduledAt: "20:00", domain: "learning" });
+    const plan = planWith([workout, later]);
+    const raj = { sleepTarget: "22:30", focusBlock: { active: false } };
+    const pauseStart = istDate(plan.date, "16:50");
+    startFocusBlock(raj, plan, { durationMin: 90, reason: "hair", now: pauseStart });
+    const after = istDate(plan.date, "18:30");
+    assert.equal(expireFocusBlockIfNeeded(raj, plan, after), true);
+    assert.equal(raj.focusBlock.active, false);
+    assert.equal(workout.holdReason, "focus_block");
+    assert.equal(later.holdReason, undefined);
   });
 });

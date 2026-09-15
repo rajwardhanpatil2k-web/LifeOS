@@ -1,9 +1,10 @@
 const { chatJson } = require("./ai");
 const { createVoiceTask } = require("./voiceTask");
 const { LIFE_AREAS } = require("./seed/rajRoutine");
+const { parseSpokenClock } = require("./clockParse");
 const {
-  padTime,
   TIME_RE,
+  hhmmIST,
   DEFAULT_PAUSE_MIN,
   MIN_PAUSE_MIN,
   MAX_PAUSE_MIN,
@@ -145,19 +146,10 @@ function parseDelayMin(transcript) {
   return 30;
 }
 
-function parseUntilClock(transcript) {
-  const match = String(transcript || "").match(
-    /\b(?:until|till|up to)\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/i
-  );
-  if (!match) return "";
-  let hour = Number(match[1]);
-  const minute = match[2] ? Number(match[2]) : 0;
-  const mer = (match[3] || "").toLowerCase();
-  if (mer.startsWith("p") && hour < 12) hour += 12;
-  if (mer.startsWith("a") && hour === 12) hour = 0;
-  if (!mer && hour <= 7) hour += 12;
-  if (!Number.isFinite(hour) || hour > 23 || minute > 59) return "";
-  return padTime(hour, minute);
+function parseUntilClock(transcript, nowHHMM = hhmmIST()) {
+  const raw = String(transcript || "");
+  if (!/\b(until|till|up to)\b/i.test(raw)) return "";
+  return parseSpokenClock(raw, nowHHMM);
 }
 
 function parseReason(transcript) {
@@ -271,6 +263,7 @@ function normalizeParsed(data, fallback) {
 
 async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   const fallback = fallbackAssistant(transcript, { itemIds });
+  const nowHHMM = hhmmIST();
   const pending = (plan.items || [])
     .filter((item) => item.status === "pending")
     .map((item) => `${item.title} (${item.scheduledAt}, ${item.domain})`)
@@ -280,6 +273,7 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   const parsed = await chatJson({
     system:
       "You classify a spoken Life OS request for today in Asia/Kolkata. " +
+      `Current time in Asia/Kolkata is ${nowHHMM}. ` +
       "skip_tasks = they will NOT do remaining or selected tasks today (festival, meeting, visiting, busy with other work). " +
       "skipScope is today (all remaining), selected (the tasks they highlighted), or named (one task by title). " +
       "reason is why they skipped, for later insights. " +
@@ -289,6 +283,9 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
       "defer_task = remind/alert about an EXISTING task in N minutes. " +
       "resume_focus = I'm back, turn alarms on. extend_focus = add more mute time. " +
       "add_task = create a new calendar task. " +
+      "For add_task, scheduledAt is 24-hour HH:MM. Keep the exact minute they said; 'around' does not mean round the clock. " +
+      "If they name a clock without AM/PM, pick the NEXT upcoming occurrence today " +
+      `(example: now ${nowHHMM} and 'around 9:56' is the next 09:56 or 21:56 that has not passed). ` +
       "Skip wins over pause when they say skip / not doing / cancel today's tasks. " +
       "Do not turn a haircut/outside/DND request into add_task.",
     user: `Pending tasks: ${pending || "none"}\nSelected task ids: ${(itemIds || []).join(", ") || "none"}\nSpoken: ${String(transcript || "").trim()}`,
@@ -299,6 +296,10 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   });
 
   const merged = normalizeParsed(parsed?.data, fallback);
+  if (merged.intent === "add_task" || fallback.intent === "add_task") {
+    const spokenAt = parseSpokenClock(transcript, nowHHMM);
+    if (spokenAt) merged.scheduledAt = spokenAt;
+  }
   if (fallback.intent === "skip_tasks") {
     return { ...merged, ...fallback, intent: "skip_tasks", confidence: Math.max(merged.confidence, fallback.confidence) };
   }

@@ -9,7 +9,7 @@ const { LIFE_AREAS, seasonalFruitsForMonth } = require("./seed/rajRoutine");
 const { computePeriodStats } = require("./insights");
 const { getInsightReport } = require("./insightReport");
 const { isAiEnabled } = require("./ai");
-const { mergeCarryForwards, setCarryForwardStatus } = require("./voiceTask");
+const { mergeCarryForwards, setCarryForwardStatus, syncCarryForwardFields } = require("./voiceTask");
 const { mergeTomorrowPrep, previewPrepItem, isLockedItem, PREP_KEY } = require("./tomorrowPrep");
 const { runAssistant } = require("./voiceAssistant");
 const {
@@ -208,6 +208,20 @@ function clearItemHold(item) {
   item.holdReason = undefined;
 }
 
+function findPlanItem(plan, itemId) {
+  const id = String(itemId || "").trim();
+  if (!id || !plan?.items) return null;
+  if (typeof plan.items.id === "function") {
+    const byId = plan.items.id(id);
+    if (byId) return byId;
+  }
+  return (
+    plan.items.find((item) => String(item._id) === id)
+    || plan.items.find((item) => item.originKey === id || item.key === id)
+    || null
+  );
+}
+
 async function logSkippedItems(user, date, skipped, source = "focus_block") {
   for (const item of skipped || []) {
     await LifeEvent.create({
@@ -248,9 +262,10 @@ function registerRoutes(app) {
     const date = todayIST(req.query.date);
     const plan = await ensureDailyPlan(user, date);
     const hhmm = nowHHMM();
-    if (expireFocusBlockIfNeeded(user)) {
+    if (expireFocusBlockIfNeeded(user, plan)) {
       if (typeof user.markModified === "function") user.markModified("focusBlock");
       await user.save();
+      await plan.save();
     }
     const scored = await saveScore(user, plan);
     res.json({
@@ -270,15 +285,16 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     item.status = "done";
     clearItemHold(item);
-    item.steps.forEach((s) => {
+    (item.steps || []).forEach((s) => {
       s.done = true;
       s.doneAt = s.doneAt || new Date();
     });
     await setCarryForwardStatus(user, item, "done");
+    if (typeof plan.markModified === "function") plan.markModified("items");
     await plan.save();
     await LifeEvent.create({
       userId: user._id,
@@ -297,7 +313,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     item.status = "skipped";
     item.skippedReason = req.body.reason || "skipped";
@@ -320,14 +336,14 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     const previousStatus = item.status;
     item.status = "pending";
     item.skippedReason = undefined;
     item.startedAt = undefined;
     clearItemHold(item);
-    item.steps.forEach((s) => {
+    (item.steps || []).forEach((s) => {
       s.done = false;
       s.doneAt = null;
     });
@@ -352,7 +368,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     const step = item.steps.find((s) => s.key === req.params.stepKey);
     if (!step) return res.status(404).json({ error: "Step not found" });
@@ -394,7 +410,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     if (item.status !== "pending") {
       return res.status(400).json({ error: "Item is no longer pending" });
@@ -420,7 +436,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     if (item.status !== "pending") {
       return res.status(400).json({ error: "Item is no longer pending" });
@@ -447,7 +463,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     if (item.status !== "pending") {
       return res.status(400).json({ error: "Item is no longer pending" });
@@ -483,14 +499,15 @@ function registerRoutes(app) {
     if (!Array.isArray(order) || order.length < 2) {
       return res.status(400).json({ error: "order must include at least 2 item ids" });
     }
-    const targets = order.map((id) => plan.items.id(id));
+    const targets = order.map((id) => findPlanItem(plan, id));
     if (targets.some((t) => !t)) return res.status(404).json({ error: "unknown item id in order" });
 
     const slots = targets.map((t) => t.scheduledAt).slice().sort((a, b) => a.localeCompare(b));
-    order.forEach((id, idx) => {
-      plan.items.id(id).scheduledAt = slots[idx];
+    targets.forEach((item, idx) => {
+      item.scheduledAt = slots[idx];
     });
     plan.items = [...plan.items].sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+    if (typeof plan.markModified === "function") plan.markModified("items");
     await plan.save();
 
     const scored = await saveScore(user, plan);
@@ -504,7 +521,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.body.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
 
     const { scheduledAt, title, durationMin } = req.body || {};
@@ -524,8 +541,12 @@ function registerRoutes(app) {
     if (!isLockedItem(item) && Number.isFinite(durationMin) && durationMin > 0) {
       item.durationMin = Math.round(durationMin);
     }
+    if (item.carryForward || item.source === "ai") {
+      await syncCarryForwardFields(user, item);
+    }
 
     plan.items = [...plan.items].sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+    if (typeof plan.markModified === "function") plan.markModified("items");
     await plan.save();
     await LifeEvent.create({
       userId: user._id,
@@ -592,7 +613,7 @@ function registerRoutes(app) {
     const user = await getUser();
     const date = todayIST(req.query.date || req.body?.date);
     const plan = await ensureDailyPlan(user, date);
-    const item = plan.items.id(req.params.itemId);
+    const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
     if (isLockedItem(item)) {
       return res.status(400).json({ error: "This reminder stays on the plan. You can only change its time." });

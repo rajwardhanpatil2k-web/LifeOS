@@ -96,7 +96,9 @@ function skipRemainingToday(plan, reason) {
 
 function skipSelected(plan, itemIds, reason) {
   const ids = new Set((itemIds || []).map((id) => String(id)));
-  const selected = (plan.items || []).filter((item) => ids.has(String(item._id)));
+  const selected = (plan.items || []).filter(
+    (item) => ids.has(String(item._id)) || ids.has(String(item.originKey || "")) || ids.has(String(item.key || ""))
+  );
   const kept = selected.filter(isProtected);
   return { ...skipList(selected, reason || "busy"), scope: "selected", kept };
 }
