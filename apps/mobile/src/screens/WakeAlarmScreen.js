@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BackHandler, StyleSheet, Text, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { useDispatch } from "react-redux";
 import { colors } from "../theme";
 import { WAKE_HOLD_MS, WAKE_QR_VALUE } from "../wakeAlarmConfig";
-import { stopWakeAlarmRinging } from "../wakeAlarm";
+import { markWakeAlarmDismissed, stopWakeAlarmRinging } from "../wakeAlarm";
+import { resetToMain } from "../navigation/AppBackgroundSync";
 import { api } from "../api";
+import { fetchToday } from "../store";
 
 // Called straight against the API (not through Redux) since this screen can
 // be the very first thing that mounts on a cold start from the lock screen —
@@ -29,14 +32,34 @@ async function autoCompleteWakeItem() {
 const TICK_MS = 200;
 const GRACE_MS = 700; // tolerate brief camera-frame gaps without resetting progress
 
+function goHome(navigation) {
+  // Deep-link cold starts (`lifeos://wake-alarm`) have no back stack, so
+  // goBack() is a no-op. Reset the root navigator onto Today instead.
+  if (resetToMain()) return;
+  try {
+    navigation.reset({ index: 0, routes: [{ name: "Main" }] });
+    return;
+  } catch (_e) {}
+  try {
+    if (navigation.canGoBack()) navigation.goBack();
+  } catch (_e) {}
+}
+
 export default function WakeAlarmScreen({ navigation }) {
+  const dispatch = useDispatch();
   const [permission, requestPermission] = useCameraPermissions();
   const [heldMs, setHeldMs] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const lastSeenAt = useRef(0);
+  const finishing = useRef(false);
+
+  const asked = useRef(false);
+  const lastScanAt = useRef(0);
 
   useEffect(() => {
-    if (!permission?.granted) requestPermission();
+    if (asked.current || !permission || permission.granted || permission.canAskAgain === false) return;
+    asked.current = true;
+    requestPermission();
   }, [permission, requestPermission]);
 
   // Wake-up-by-design: the whole point is you can't back out of this screen,
@@ -46,34 +69,53 @@ export default function WakeAlarmScreen({ navigation }) {
     return () => sub.remove();
   }, []);
 
-  const finish = useCallback(async () => {
-    if (dismissed) return;
+  const finish = useCallback(() => {
+    if (finishing.current) return;
+    finishing.current = true;
+    markWakeAlarmDismissed();
     setDismissed(true);
-    try {
-      await stopWakeAlarmRinging();
-    } catch (_e) {
-      // best effort — the foreground service will still time out eventually
-    }
-    autoCompleteWakeItem();
-    navigation.goBack();
-  }, [dismissed, navigation]);
+
+    const leave = () => goHome(navigation);
+
+    // Never await native/API work before leaving — a hung bridge or a
+    // production API retry would freeze this screen at 100%.
+    stopWakeAlarmRinging().catch(() => {}).finally(leave);
+    setTimeout(leave, 250);
+    setTimeout(() => {
+      try {
+        const state = navigation.getState();
+        const route = state?.routes?.[state.index]?.name;
+        if (route !== "Main") leave();
+      } catch (_e) {
+        leave();
+      }
+    }, 900);
+
+    autoCompleteWakeItem()
+      .then(() => dispatch(fetchToday()))
+      .catch(() => {});
+  }, [dispatch, navigation]);
 
   useEffect(() => {
-    if (dismissed) return;
+    if (dismissed) return undefined;
     const interval = setInterval(() => {
       const seenRecently = Date.now() - lastSeenAt.current < GRACE_MS;
-      setHeldMs((prev) => {
-        const next = seenRecently ? Math.min(prev + TICK_MS, WAKE_HOLD_MS) : 0;
-        if (next >= WAKE_HOLD_MS) finish();
-        return next;
-      });
+      setHeldMs((prev) => (seenRecently ? Math.min(prev + TICK_MS, WAKE_HOLD_MS) : 0));
     }, TICK_MS);
     return () => clearInterval(interval);
-  }, [dismissed, finish]);
+  }, [dismissed]);
+
+  useEffect(() => {
+    if (heldMs >= WAKE_HOLD_MS) finish();
+  }, [heldMs, finish]);
 
   const onBarcodeScanned = useCallback(({ data }) => {
+    if (finishing.current) return;
+    const now = Date.now();
+    if (now - lastScanAt.current < 150) return;
+    lastScanAt.current = now;
     if (data === WAKE_QR_VALUE) {
-      lastSeenAt.current = Date.now();
+      lastSeenAt.current = now;
     }
   }, []);
 
@@ -84,14 +126,21 @@ export default function WakeAlarmScreen({ navigation }) {
     <View style={styles.page}>
       <Text style={styles.title}>⏰ Wake up</Text>
       <Text style={styles.subtitle}>
-        Hold the wake QR code in the camera for 15 seconds, without looking away, to silence the alarm.
+        {dismissed
+          ? "Alarm off. Opening Today…"
+          : "Hold the wake QR code in the camera for 15 seconds, without looking away, to silence the alarm."}
       </Text>
 
       <View style={styles.cameraWrap}>
-        {permission?.granted ? (
+        {dismissed ? (
+          <View style={styles.permissionBox}>
+            <Text style={styles.permissionText}>You're up.</Text>
+          </View>
+        ) : permission?.granted ? (
           <CameraView
             style={StyleSheet.absoluteFillObject}
             facing="back"
+            active={!dismissed}
             barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
             onBarcodeScanned={onBarcodeScanned}
           />
@@ -109,7 +158,11 @@ export default function WakeAlarmScreen({ navigation }) {
         <View style={[styles.progressFill, { width: `${pct}%` }]} />
       </View>
       <Text style={styles.progressLabel}>
-        {heldMs > 0 ? `Holding steady · ${secondsLeft}s left` : "Point the camera at the wake code"}
+        {dismissed
+          ? "Taking you home"
+          : heldMs > 0
+            ? `Holding steady · ${secondsLeft}s left`
+            : "Point the camera at the wake code"}
       </Text>
     </View>
   );

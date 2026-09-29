@@ -1,7 +1,23 @@
 import { configureStore, createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { api } from "./api";
 
-export const fetchToday = createAsyncThunk("today/fetch", async () => api("/api/today"));
+let mutationEpoch = 0;
+let inflightMutations = 0;
+
+function noteMutationStart() {
+  inflightMutations += 1;
+  mutationEpoch += 1;
+}
+
+function noteMutationEnd() {
+  inflightMutations = Math.max(0, inflightMutations - 1);
+}
+
+export const fetchToday = createAsyncThunk("today/fetch", async () => {
+  const epoch = mutationEpoch;
+  const data = await api("/api/today");
+  return { data, epoch };
+});
 export const fetchWeek = createAsyncThunk("today/week", async () => api("/api/week"));
 export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPayload) => {
   const itemId = String(
@@ -123,6 +139,25 @@ function applyItemUpdateToDay(state, action) {
   );
 }
 
+const todayMutationThunks = [
+  completeItem,
+  markItemReady,
+  snoozeItem,
+  remindLaterItem,
+  skipItem,
+  undoItem,
+  toggleStep,
+  reorderItems,
+  updateItemSchedule,
+  addTodayItem,
+  addVoiceTask,
+  pauseFocus,
+  resumeFocus,
+  extendFocus,
+  removeTodayItem,
+  updateSettings,
+];
+
 const todaySlice = createSlice({
   name: "today",
   initialState: {
@@ -133,15 +168,19 @@ const todaySlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchToday.pending, (state) => {
+      .addCase(fetchToday.pending, (state, action) => {
+        state.latestFetchId = action.meta.requestId;
         if (!state.data) state.loading = true;
         state.error = null;
       })
       .addCase(fetchToday.fulfilled, (state, action) => {
         state.loading = false;
-        state.data = action.payload;
+        if (state.latestFetchId !== action.meta.requestId) return;
+        if (action.payload.epoch !== mutationEpoch || inflightMutations > 0) return;
+        state.data = action.payload.data;
       })
       .addCase(fetchToday.rejected, (state, action) => {
+        if (state.latestFetchId !== action.meta.requestId) return;
         state.loading = false;
         state.error = action.error.message;
       })
@@ -175,7 +214,22 @@ const todaySlice = createSlice({
           state.data.score = action.payload.today.score;
           state.data.next = action.payload.today.next;
         }
-      });
+      })
+      .addMatcher(
+        (action) => todayMutationThunks.some((thunk) => action.type === thunk.pending.type),
+        () => {
+          noteMutationStart();
+        }
+      )
+      .addMatcher(
+        (action) =>
+          todayMutationThunks.some(
+            (thunk) => action.type === thunk.fulfilled.type || action.type === thunk.rejected.type
+          ),
+        () => {
+          noteMutationEnd();
+        }
+      );
   },
 });
 
@@ -188,15 +242,18 @@ const daySlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchDay.pending, (state) => {
+      .addCase(fetchDay.pending, (state, action) => {
+        state.latestFetchId = action.meta.requestId;
         state.loading = true;
         state.error = null;
       })
       .addCase(fetchDay.fulfilled, (state, action) => {
+        if (state.latestFetchId !== action.meta.requestId) return;
         state.loading = false;
         state.data = action.payload;
       })
       .addCase(fetchDay.rejected, (state, action) => {
+        if (state.latestFetchId !== action.meta.requestId) return;
         state.loading = false;
         state.error = action.error.message;
       })
@@ -309,6 +366,9 @@ const insightsSlice = createSlice({
         state.error = null;
       })
       .addCase(fetchInsights.fulfilled, (state, action) => {
+        const requested = action.meta.arg?.period || "month";
+        const requestedDate = action.meta.arg?.date || null;
+        if (requested !== state.period || requestedDate !== (state.date || null)) return;
         state.loading = false;
         state.stats = action.payload.stats;
         state.aiEnabled = action.payload.aiEnabled;
@@ -322,6 +382,9 @@ const insightsSlice = createSlice({
         state.reportError = null;
       })
       .addCase(fetchInsightReport.fulfilled, (state, action) => {
+        const requested = action.meta.arg?.period || "month";
+        const requestedDate = action.meta.arg?.date || null;
+        if (requested !== state.period || requestedDate !== (state.date || null)) return;
         state.reportLoading = false;
         state.report = action.payload.report;
         state.stats = action.payload.stats;

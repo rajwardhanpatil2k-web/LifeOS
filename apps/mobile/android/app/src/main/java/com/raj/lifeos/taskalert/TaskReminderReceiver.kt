@@ -23,6 +23,7 @@ class TaskReminderReceiver : BroadcastReceiver() {
 
       if (AlarmRingingService.isRinging() || TaskCallState.busy()) {
         TaskCallQueue.enqueue(context, reminder)
+        if (reminder.id.isNotBlank()) TaskReminderScheduler.consume(context, reminder.id, reminder.phase)
         return
       }
 
@@ -32,6 +33,10 @@ class TaskReminderReceiver : BroadcastReceiver() {
           TaskReminderScheduler.schedule(context, reminder.copy(at = pause))
         }
         return
+      }
+
+      if (reminder.id.isNotBlank()) {
+        TaskReminderScheduler.consume(context, reminder.id, reminder.phase)
       }
 
       val service = Intent(context, TaskAlertService::class.java)
@@ -48,6 +53,18 @@ class TaskReminderReceiver : BroadcastReceiver() {
         } catch (_: Exception) {
         }
       }
+      // Same second-chance as the wake alarm: some OEMs skip FGS / full-screen
+      // intents while the app has been unused, but still allow an activity start
+      // from an AlarmClock receiver.
+      TaskCallIntents.launchScreen(
+        context,
+        reminder.id,
+        reminder.phase,
+        reminder.title,
+        reminder.alertLevel,
+        reminder.durationMin,
+        reminder.domain
+      )
     } finally {
       pending.finish()
     }

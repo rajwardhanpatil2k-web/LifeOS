@@ -1,7 +1,7 @@
 const { resolveDeferItem } = require("./focusBlock");
 
 function isProtected(item) {
-  return !item || item.alarmMode === "scan_dismiss";
+  return !item || item.alarmMode === "scan_dismiss" || item.locked === true || item.key === "tomorrow-prep";
 }
 
 function isSkippable(item) {

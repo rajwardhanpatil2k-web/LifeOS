@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -42,14 +43,16 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy()) {
-      stopSelf()
+    if (AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy() || phoneCallActive()) {
+      ensureForeground()
+      stopSpeaking()
       return START_NOT_STICKY
     }
 
     val text = intent?.getStringExtra(EXTRA_TEXT)?.trim().orEmpty()
     if (text.isEmpty()) {
-      stopSelf()
+      ensureForeground()
+      stopSpeaking()
       return START_NOT_STICKY
     }
 
@@ -114,7 +117,7 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
     handler.removeCallbacks(stopRunnable)
     handler.postDelayed({
       val engine = tts
-      if (engine == null || AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy()) {
+      if (engine == null || AlarmRingingService.isRinging() || com.raj.lifeos.taskalert.TaskCallState.busy() || phoneCallActive()) {
         stopSpeaking()
         return@postDelayed
       }
@@ -126,6 +129,11 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
       handler.removeCallbacks(stopRunnable)
       handler.postDelayed(stopRunnable, 45_000L)
     }, 700L)
+  }
+
+  private fun phoneCallActive(): Boolean {
+    val manager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+    return manager.mode == AudioManager.MODE_IN_CALL || manager.mode == AudioManager.MODE_IN_COMMUNICATION
   }
 
   private fun pickVoice(engine: TextToSpeech): Voice? {
@@ -237,6 +245,11 @@ class VoiceAgentService : Service(), TextToSpeech.OnInitListener {
     } catch (_: Exception) {
     }
     tts = null
+    try {
+      wakeLock?.let { if (it.isHeld) it.release() }
+    } catch (_: Exception) {
+    }
+    wakeLock = null
     super.onDestroy()
   }
 }

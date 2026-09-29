@@ -26,6 +26,7 @@ object AlarmScheduler {
   // treating that as "already passed" used to silently push the alarm to
   // tomorrow. A two-minute grace keeps tonight's ring.
   private const val JUST_PASSED_GRACE_MS = 120_000L
+  private const val MISSED_FIRE_WINDOW_MS = 30 * 60 * 1000L
   const val WAKE_ALARM_URI = "lifeos://wake-alarm"
 
   private fun istCalendar(): Calendar = Calendar.getInstance(TimeZone.getTimeZone(IST))
@@ -92,17 +93,33 @@ object AlarmScheduler {
     AlarmRingingService.stop(context)
   }
 
-  // Called from AlarmReceiver (alarm just fired, arm tomorrow) and
-  // BootReceiver (device just rebooted, restore whatever was scheduled).
+  // After a fire, never use the "just passed" grace or we'd ring again
+  // three seconds later in a loop.
   fun rescheduleFromReceiver(context: Context) {
     val (hour, minute, enabled) = readPersisted(context)
     if (enabled && hour in 0..23 && minute in 0..59) {
-      // After a fire, never use the "just passed" grace or we'd ring again
-      // three seconds later in a loop.
       val next = nextTriggerMillis(hour, minute, allowSoonIfJustPassed = false)
       persist(context, hour, minute, true, next)
       armSystemAlarm(context, next)
     }
+  }
+
+  // Reboot and clock changes wipe AlarmManager. A fire time that is still
+  // ahead is re-armed as-is. One missed in the last half hour rings now.
+  // Anything older waits for the next occurrence, so a noon reboot does not
+  // replay this morning's alarm.
+  fun restoreAfterBoot(context: Context) {
+    val (hour, minute, enabled) = readPersisted(context)
+    if (!enabled || hour !in 0..23 || minute !in 0..59) return
+    val now = System.currentTimeMillis()
+    val existing = readNextAt(context)
+    val next = when {
+      existing >= now + 2_000L -> existing
+      existing > 0L && now - existing <= MISSED_FIRE_WINDOW_MS -> now + 3_000L
+      else -> nextTriggerMillis(hour, minute, allowSoonIfJustPassed = false)
+    }
+    persist(context, hour, minute, true, next)
+    armSystemAlarm(context, next)
   }
 
   fun nextAlarmAtMillis(context: Context): Long {
@@ -124,14 +141,26 @@ object AlarmScheduler {
         AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent(context)),
         op
       )
+      return
     } catch (_: SecurityException) {
-      // Exact-alarm toggle off: still try the Doze-friendly exact API.
+    }
+    try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, op)
       } else {
         @Suppress("DEPRECATION")
         am.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, op)
       }
+      return
+    } catch (_: Exception) {
+    }
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, op)
+      } else {
+        am.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, op)
+      }
+    } catch (_: Exception) {
     }
   }
 

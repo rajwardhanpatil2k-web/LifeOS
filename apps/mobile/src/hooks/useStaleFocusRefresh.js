@@ -15,13 +15,10 @@ export function useStaleFocusRefresh(effect, staleMs = 60000, enabled = true) {
       if (lastRun.current !== 0 && now - lastRun.current < staleMs) return undefined;
       busy.current = true;
       lastRun.current = now;
-      let cancelled = false;
       Promise.resolve(effect()).finally(() => {
-        if (!cancelled) busy.current = false;
+        busy.current = false;
       });
-      return () => {
-        cancelled = true;
-      };
+      return undefined;
     }, [effect, enabled, staleMs])
   );
 }

@@ -10,10 +10,15 @@ import com.raj.lifeos.taskalert.TaskReminderScheduler
 // and any still-future spoken task cues.
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == "android.intent.action.QUICKBOOT_POWERON") {
-      AlarmScheduler.rescheduleFromReceiver(context)
-      VoiceAgentScheduler.restore(context)
-      TaskReminderScheduler.restore(context)
-    }
+    val action = intent.action ?: return
+    val restore = action == Intent.ACTION_BOOT_COMPLETED ||
+      action == Intent.ACTION_MY_PACKAGE_REPLACED ||
+      action == Intent.ACTION_TIME_CHANGED ||
+      action == Intent.ACTION_TIMEZONE_CHANGED ||
+      action == "android.intent.action.QUICKBOOT_POWERON"
+    if (!restore) return
+    AlarmScheduler.restoreAfterBoot(context)
+    VoiceAgentScheduler.restore(context)
+    TaskReminderScheduler.restore(context)
   }
 }

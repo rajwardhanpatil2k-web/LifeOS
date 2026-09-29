@@ -13,6 +13,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.raj.lifeos.MainActivity
 
 class WakeAlarmModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
   override fun getName(): String = "WakeAlarmModule"
@@ -41,6 +42,10 @@ class WakeAlarmModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
   fun stopRinging(promise: Promise) {
     try {
       AlarmRingingService.stop(reactApplicationContext)
+      val activity = currentActivity
+      if (activity is MainActivity) {
+        activity.runOnUiThread { activity.clearWakeOverlayFlags() }
+      }
       promise.resolve(true)
     } catch (e: Exception) {
       promise.reject("STOP_FAILED", e)

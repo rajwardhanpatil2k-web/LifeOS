@@ -100,7 +100,16 @@ class TaskAlertService : Service() {
       else postSessionNotification()
       return START_STICKY
     }
+
+    val incoming = reminderFrom(intent)
     if (AlarmRingingService.isRinging()) {
+      if (incoming.id.isNotBlank()) TaskCallQueue.enqueue(this, incoming)
+      try {
+        createChannel()
+        startForegroundNotification(buildNotification(incoming = false))
+      } catch (_: Exception) {
+      }
+      dismissCallNotification()
       stopSelf()
       return START_NOT_STICKY
     }
@@ -158,6 +167,20 @@ class TaskAlertService : Service() {
     }
     scheduleUnansweredTimeout()
     return START_STICKY
+  }
+
+  private fun reminderFrom(intent: Intent?): TaskReminderScheduler.Reminder {
+    val saved = TaskCallState.read(this)
+    return TaskReminderScheduler.Reminder(
+      id = intent?.getStringExtra(TaskCallIntents.EXTRA_ID).orEmpty().ifBlank { saved?.id.orEmpty() },
+      title = intent?.getStringExtra(TaskCallIntents.EXTRA_TITLE)?.trim().orEmpty().ifBlank { saved?.title ?: "Task" },
+      spokenText = intent?.getStringExtra(TaskCallIntents.EXTRA_TEXT).orEmpty().ifBlank { saved?.spokenText.orEmpty() },
+      alertLevel = intent?.getStringExtra(TaskCallIntents.EXTRA_ALERT_LEVEL) ?: saved?.alertLevel ?: "normal",
+      at = System.currentTimeMillis(),
+      phase = intent?.getStringExtra(TaskCallIntents.EXTRA_PHASE) ?: saved?.phase ?: TaskCallState.PHASE_START,
+      durationMin = intent?.getIntExtra(TaskCallIntents.EXTRA_DURATION, saved?.durationMin ?: 0) ?: 0,
+      domain = intent?.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty().ifBlank { saved?.domain.orEmpty() }
+    )
   }
 
   private fun ringtoneUri(): Uri =
@@ -439,6 +462,12 @@ class TaskAlertService : Service() {
     try { player?.stop() } catch (_: Exception) {}
     try { player?.release() } catch (_: Exception) {}
     player = null
+    try { vibrator?.cancel() } catch (_: Exception) {}
+    vibrator = null
+    try {
+      wakeLock?.let { if (it.isHeld) it.release() }
+    } catch (_: Exception) {}
+    wakeLock = null
     super.onDestroy()
   }
 }

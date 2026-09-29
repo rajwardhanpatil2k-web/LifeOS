@@ -63,8 +63,6 @@ object TaskReminderScheduler {
 
   fun replaceAll(context: Context, planned: List<Reminder>) {
     if (!isEnabled(context)) return
-    TaskCallQueue.clear(context)
-    cancelArmed(context)
     val now = System.currentTimeMillis()
     val pause = pausedUntil(context)
     val previous = load(context)
@@ -77,16 +75,33 @@ object TaskReminderScheduler {
       val override = keptOverrides.find { it.id == reminder.id && it.phase == reminder.phase }
       var at = reminder.at
       if (override != null && override.at > at) at = override.at
-      val prev = previous.find { it.id == reminder.id && it.phase == reminder.phase }
-      if (prev != null && prev.at > now + 1_000L && at > now + 1_000L) {
-        val bothSoon = prev.at - now < 15 * 60 * 1000L && at - now < 15 * 60 * 1000L
-        if (bothSoon) at = kotlin.math.min(prev.at, at)
-      }
+      // A 9:00 alarm synced at 8:59:59.5 used to be dropped (at <= now+1s) and
+      // never re-armed. Bump imminent times instead of deleting them.
+      if (at in (now - 120_000L)..(now + 1_000L)) at = now + 2_000L
       reminder.copy(at = at)
     }.filter { it.at > now + 1_000L && (pause <= now || it.at >= pause) }
 
+    val newKeys = merged.map { it.id to it.phase }.toSet()
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    for (old in previous) {
+      if ((old.id to old.phase) !in newKeys) {
+        try { am.cancel(operation(context, old)) } catch (_: Exception) {}
+      }
+    }
     save(context, merged)
     for (reminder in merged) arm(context, reminder)
+  }
+
+  fun consume(context: Context, id: String, phase: String) {
+    if (id.isBlank()) return
+    val current = load(context)
+    val fired = current.filter { it.id == id && it.phase == phase }
+    val remaining = current.filter { it.id != id || it.phase != phase }
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    for (existing in fired) {
+      try { am.cancel(operation(context, existing)) } catch (_: Exception) {}
+    }
+    save(context, remaining)
   }
 
   fun schedule(context: Context, reminder: Reminder) {
@@ -94,24 +109,37 @@ object TaskReminderScheduler {
     if (reminder.id.isBlank() || reminder.title.isBlank()) return
     val now = System.currentTimeMillis()
     val pause = pausedUntil(context)
-    if (reminder.at <= now + 1_000L) return
-    if (pause > now && reminder.at < pause) return
+    var at = reminder.at
+    if (at in (now - 120_000L)..(now + 1_000L)) at = now + 2_000L
+    if (at <= now + 1_000L) return
+    if (pause > now && at < pause) return
 
-    val reminders = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
-    reminders.add(reminder)
+    val next = reminder.copy(at = at)
+    val reminders = load(context).filter { it.id != next.id || it.phase != next.phase }.toMutableList()
+    reminders.add(next)
     save(context, reminders)
-    arm(context, reminder)
+    arm(context, next)
   }
 
-  fun nextFreeAt(context: Context, desiredAt: Long, excludeId: String = ""): Long {
-    val occupied = load(context).filter { it.id != excludeId }.map { it.at }
+  fun nextFreeAt(context: Context, desiredAt: Long, excludeId: String = "", excludePhase: String = ""): Long {
+    val occupied = load(context)
+      .filter { it.id != excludeId || (excludePhase.isNotBlank() && it.phase != excludePhase) }
+      .map { it.at }
+    return spacedAt(occupied, desiredAt)
+  }
+
+  private fun spacedAt(occupied: List<Long>, desiredAt: Long): Long {
     var at = desiredAt
+    var guard = 0
     var moved = true
-    while (moved) {
+    while (moved && guard < 96) {
+      guard += 1
       moved = false
       for (other in occupied) {
         if (kotlin.math.abs(at - other) < CALL_GAP_MS) {
-          at = other + CALL_GAP_MS
+          val next = other + CALL_GAP_MS
+          if (next <= at) continue
+          at = next
           moved = true
         }
       }
@@ -125,7 +153,7 @@ object TaskReminderScheduler {
     val pause = pausedUntil(context)
     val desired = now + delayMs.coerceAtLeast(3_000L)
     val gated = if (pause > now) maxOf(desired, pause) else desired
-    val at = nextFreeAt(context, gated, base.id)
+    val at = nextFreeAt(context, gated, base.id, base.phase)
     val reminder = base.copy(at = at)
     val overrides = loadOverrides(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
     overrides.add(reminder)
@@ -160,9 +188,24 @@ object TaskReminderScheduler {
     if (!isEnabled(context)) return
     val now = System.currentTimeMillis()
     val pause = pausedUntil(context)
-    val future = load(context).filter { it.at > now + 1_000L && (pause <= now || it.at >= pause) }
-    save(context, future)
-    for (reminder in future) arm(context, reminder)
+    val future = ArrayList<Reminder>()
+    val overdue = ArrayList<Reminder>()
+    for (reminder in load(context)) {
+      if (pause > now && reminder.at < pause) continue
+      if (reminder.at > now + 1_000L) future.add(reminder)
+      else overdue.add(reminder)
+    }
+    overdue.sortBy { it.at }
+    val restored = ArrayList(future)
+    var cursor = now + 3_000L
+    for (reminder in overdue) {
+      val occupied = restored.map { it.at }
+      val at = spacedAt(occupied, maxOf(cursor, now + 3_000L))
+      restored.add(reminder.copy(at = at))
+      cursor = at + CALL_GAP_MS
+    }
+    save(context, restored)
+    for (reminder in restored) arm(context, reminder)
     if (!TaskCallState.busy()) TaskCallQueue.parkAll(context, QUEUE_RELEASE_MS)
   }
 
@@ -178,17 +221,44 @@ object TaskReminderScheduler {
     if (pause > System.currentTimeMillis() && reminder.at < pause) return
     val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val op = operation(context, reminder)
+    val show = showOperation(context, reminder)
+    // setAlarmClock is what the wake alarm uses — it still fires in Doze after
+    // the app has been unused for hours. setExactAndAllowWhileIdle does not.
     try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, op)
-      } else {
-        @Suppress("DEPRECATION")
-        am.setExact(AlarmManager.RTC_WAKEUP, reminder.at, op)
-      }
+      am.setAlarmClock(AlarmManager.AlarmClockInfo(reminder.at, show), op)
     } catch (_: SecurityException) {
-      @Suppress("DEPRECATION")
-      am.set(AlarmManager.RTC_WAKEUP, reminder.at, op)
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+          am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, op)
+        } else {
+          @Suppress("DEPRECATION")
+          am.setExact(AlarmManager.RTC_WAKEUP, reminder.at, op)
+        }
+      } catch (_: Exception) {
+        @Suppress("DEPRECATION")
+        am.set(AlarmManager.RTC_WAKEUP, reminder.at, op)
+      }
     }
+  }
+
+  private fun showOperation(context: Context, reminder: Reminder): PendingIntent {
+    val intent = TaskCallIntents.screenIntent(
+      context,
+      reminder.id,
+      reminder.phase,
+      reminder.title,
+      reminder.alertLevel,
+      reminder.durationMin,
+      reminder.domain
+    )
+    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
+    return PendingIntent.getActivity(
+      context,
+      requestCode(reminder.id, reminder.phase) xor 0x00A50000,
+      intent,
+      flags
+    )
   }
 
   private fun operation(context: Context, reminder: Reminder): PendingIntent {

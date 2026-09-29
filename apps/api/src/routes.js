@@ -57,8 +57,19 @@ function minutesToHHMM(totalMin) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
+// Null when the result is not a same-day clock. Callers keep the template
+// time instead of pinning every overflow onto 00:00 or 23:59.
 function shiftTime(hhmm, deltaMin) {
-  return minutesToHHMM(toMinutes(hhmm) + deltaMin);
+  const next = toMinutes(hhmm) + deltaMin;
+  if (next < 0 || next > 23 * 60 + 59) return null;
+  return minutesToHHMM(next);
+}
+
+function anchorsAreOrdered(user) {
+  const wake = toMinutes(user.wakeTarget || "06:00");
+  const home = toMinutes(user.homeTarget || "19:30");
+  const sleep = toMinutes(user.sleepTarget || "22:30");
+  return home > wake && home < sleep;
 }
 
 // Two anchors drive the day: the template's "wake" item for the morning, and
@@ -77,7 +88,15 @@ function computeShiftMinutes(templateItems, targetTime, anchorKey) {
 function shiftForAnchor(item, wakeShiftMin, homeShiftMin) {
   if (item.anchor === "fixed") return item.scheduledAt;
   const delta = item.anchor === "home" ? homeShiftMin : wakeShiftMin;
-  return shiftTime(item.scheduledAt, delta);
+  return shiftTime(item.scheduledAt, delta) || item.scheduledAt;
+}
+
+function effectiveShifts(templateItems, user) {
+  const wakeShiftMin = computeShiftMinutes(templateItems, user.wakeTarget, "wake");
+  const homeShiftMin = anchorsAreOrdered(user)
+    ? computeShiftMinutes(templateItems, user.homeTarget, "home")
+    : 0;
+  return { wakeShiftMin, homeShiftMin };
 }
 
 // "flexible" items (currently just study) are allowed to compress earlier
@@ -101,10 +120,18 @@ function clampFlexibleItems(items) {
 }
 
 function applyShifts(templateItems, wakeShiftMin, homeShiftMin) {
-  const shifted = templateItems.map((item) => ({
+  const preliminary = templateItems.map((item) => ({
     ...item,
     scheduledAt: shiftForAnchor(item, wakeShiftMin, homeShiftMin),
   }));
+  const fixedStarts = preliminary.filter((i) => i.anchor === "fixed").map((i) => toMinutes(i.scheduledAt));
+  const earliestFixed = fixedStarts.length ? Math.min(...fixedStarts) : null;
+  const shifted = preliminary.map((item) => {
+    if (item.anchor === "fixed" || item.flexible || earliestFixed == null) return item;
+    if (toMinutes(item.scheduledAt) < earliestFixed) return item;
+    const original = templateItems.find((row) => row.key === item.key);
+    return { ...item, scheduledAt: original ? original.scheduledAt : item.scheduledAt };
+  });
   return clampFlexibleItems(shifted).sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
 }
 
@@ -122,13 +149,14 @@ function fillSeasonalFruit(items, date) {
 }
 
 function scorePlan(items) {
-  const actionable = items.filter((i) => i.alertLevel !== "info");
-  const total = actionable.length || items.length;
-  const completed = (actionable.length ? actionable : items).filter((i) => i.status === "done").length;
-  const skipped = items.filter((i) => i.status === "skipped").length;
+  const list = items || [];
+  const actionable = list.filter((i) => i.alertLevel !== "info");
+  const total = actionable.length;
+  const completed = actionable.filter((i) => i.status === "done").length;
+  const skipped = list.filter((i) => i.status === "skipped").length;
   const overall = total ? Math.round((completed / total) * 100) : 0;
   const byDomain = {};
-  for (const item of items) {
+  for (const item of list) {
     if (!byDomain[item.domain]) byDomain[item.domain] = { done: 0, total: 0 };
     if (item.alertLevel !== "info") {
       byDomain[item.domain].total += 1;
@@ -166,8 +194,7 @@ async function ensureDailyPlan(user, date) {
   const weekday = weekdayFromDate(date);
   const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
   if (!template) throw new Error("No template for weekday " + weekday);
-  const wakeShiftMin = computeShiftMinutes(template.items, user.wakeTarget, "wake");
-  const homeShiftMin = computeShiftMinutes(template.items, user.homeTarget, "home");
+  const { wakeShiftMin, homeShiftMin } = effectiveShifts(template.items, user);
   const scheduled = fillSeasonalFruit(applyShifts(template.items, wakeShiftMin, homeShiftMin), date);
   plan = await DailyPlan.create({
     userId: user._id,
@@ -200,6 +227,11 @@ async function saveScore(user, plan) {
 }
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+async function savePlan(plan) {
+  if (typeof plan.markModified === "function") plan.markModified("items");
+  await plan.save();
+}
 
 function clearItemHold(item) {
   item.snoozeUntil = undefined;
@@ -315,10 +347,16 @@ function registerRoutes(app) {
     const plan = await ensureDailyPlan(user, date);
     const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
+    if (isLockedItem(item) || item.alarmMode === "scan_dismiss") {
+      return res.status(400).json({ error: "This item stays on today's plan." });
+    }
+    if (item.status === "done") {
+      return res.status(400).json({ error: "Item is already done" });
+    }
     item.status = "skipped";
     item.skippedReason = req.body.reason || "skipped";
     clearItemHold(item);
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -350,7 +388,7 @@ function registerRoutes(app) {
     if (item.carryForward || item.source === "ai") {
       await setCarryForwardStatus(user, item, "open");
     }
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -391,7 +429,7 @@ function registerRoutes(app) {
         await setCarryForwardStatus(user, item, "open");
       }
     }
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -417,7 +455,7 @@ function registerRoutes(app) {
     }
     item.startedAt = new Date();
     clearItemHold(item);
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -443,7 +481,7 @@ function registerRoutes(app) {
     }
     const minutes = Number.isFinite(Number(req.body.minutes)) ? Math.max(1, Number(req.body.minutes)) : 5;
     item.snoozeUntil = new Date(Date.now() + minutes * 60 * 1000);
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -471,7 +509,7 @@ function registerRoutes(app) {
     const minutes = Number.isFinite(Number(req.body.minutes)) ? Math.max(1, Number(req.body.minutes)) : 15;
     if (!item.startedAt) item.startedAt = new Date();
     item.followUpUntil = new Date(Date.now() + minutes * 60 * 1000);
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -503,12 +541,17 @@ function registerRoutes(app) {
     if (targets.some((t) => !t)) return res.status(404).json({ error: "unknown item id in order" });
 
     const slots = targets.map((t) => t.scheduledAt).slice().sort((a, b) => a.localeCompare(b));
+    let prepMoved = false;
     targets.forEach((item, idx) => {
       item.scheduledAt = slots[idx];
+      if (item.key === PREP_KEY) {
+        user.prepTarget = slots[idx];
+        prepMoved = true;
+      }
     });
     plan.items = [...plan.items].sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-    if (typeof plan.markModified === "function") plan.markModified("items");
-    await plan.save();
+    if (prepMoved) await user.save();
+    await savePlan(plan);
 
     const scored = await saveScore(user, plan);
     res.json({ items: plan.items, score: scored, next: nextAction(plan.items, nowHHMM()) });
@@ -594,7 +637,7 @@ function registerRoutes(app) {
       steps: [{ key: "main", label, done: false }],
     });
     plan.items = [...plan.items].sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -626,7 +669,7 @@ function registerRoutes(app) {
       await setCarryForwardStatus(user, item, "cancelled");
     }
     plan.items = plan.items.filter((i) => String(i._id) !== String(item._id));
-    await plan.save();
+    await savePlan(plan);
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -816,6 +859,19 @@ function registerRoutes(app) {
   app.put("/api/settings", wrap(async (req, res) => {
     const user = await getUser();
     const { wakeTarget, homeTarget, themeMode, voiceAlerts, prepTarget } = req.body || {};
+    const nextWake = wakeTarget && TIME_RE.test(wakeTarget) ? wakeTarget : user.wakeTarget;
+    const nextHome = homeTarget && TIME_RE.test(homeTarget) ? homeTarget : user.homeTarget;
+    const nextUser = {
+      wakeTarget: nextWake,
+      homeTarget: nextHome,
+      sleepTarget: user.sleepTarget || "22:30",
+    };
+    const touchesAnchors = (wakeTarget && TIME_RE.test(wakeTarget)) || (homeTarget && TIME_RE.test(homeTarget));
+    if (touchesAnchors && !anchorsAreOrdered(nextUser)) {
+      return res.status(400).json({
+        error: "Set home time after wake time and before sleep, on the same day.",
+      });
+    }
     if (wakeTarget && TIME_RE.test(wakeTarget)) user.wakeTarget = wakeTarget;
     if (homeTarget && TIME_RE.test(homeTarget)) user.homeTarget = homeTarget;
     if (prepTarget && TIME_RE.test(prepTarget)) user.prepTarget = prepTarget;
@@ -830,8 +886,7 @@ function registerRoutes(app) {
       const weekday = weekdayFromDate(date);
       const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
       if (template) {
-        const newWakeShift = computeShiftMinutes(template.items, user.wakeTarget, "wake");
-        const newHomeShift = computeShiftMinutes(template.items, user.homeTarget, "home");
+        const { wakeShiftMin: newWakeShift, homeShiftMin: newHomeShift } = effectiveShifts(template.items, user);
         // Recompute pending items straight from the immutable template
         // (fresh shift + clamp) rather than nudging their current, possibly
         // already-clamped, scheduledAt — that incremental approach compounds
@@ -909,8 +964,7 @@ function registerRoutes(app) {
     const weekday = weekdayFromDate(date);
     const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
     if (!template) return res.status(404).json({ error: "No template for that day" });
-    const wakeShiftMin = computeShiftMinutes(template.items, user.wakeTarget, "wake");
-    const homeShiftMin = computeShiftMinutes(template.items, user.homeTarget, "home");
+    const { wakeShiftMin, homeShiftMin } = effectiveShifts(template.items, user);
     const items = fillSeasonalFruit(applyShifts(template.items, wakeShiftMin, homeShiftMin), date).map((item) => ({
       ...item,
       status: "pending",
@@ -1012,4 +1066,4 @@ function registerRoutes(app) {
   }));
 }
 
-module.exports = { registerRoutes };
+module.exports = { registerRoutes, applyShifts, scorePlan, anchorsAreOrdered };

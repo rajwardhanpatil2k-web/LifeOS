@@ -7,6 +7,19 @@ const { WakeAlarmModule } = NativeModules;
 // absent in Expo Go / iOS, so every call here degrades to a safe no-op.
 const available = Platform.OS === "android" && !!WakeAlarmModule;
 
+// After a successful QR dismiss, native isRinging() can stay true for a beat
+// (stop is delivered via startService). Block re-opening the scanner so the
+// user is not yanked back off Today.
+let dismissedUntil = 0;
+
+export function markWakeAlarmDismissed(ms = 20_000) {
+  dismissedUntil = Date.now() + ms;
+}
+
+export function wasWakeAlarmJustDismissed() {
+  return Date.now() < dismissedUntil;
+}
+
 export function isWakeAlarmAvailable() {
   return available;
 }

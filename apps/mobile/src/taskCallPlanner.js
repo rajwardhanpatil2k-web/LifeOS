@@ -27,48 +27,75 @@ function clampPause(at, now, pausedUntil) {
   return at;
 }
 
-function otherInProgressUntil(item, pending) {
-  let until = 0;
-  for (const other of pending) {
-    if (!other.startedAt) continue;
-    if (String(other._id) === String(item._id)) continue;
-    const endAt = Math.max(endTimeMillis(other), parseMillis(other.followUpUntil));
-    if (endAt > until) until = endAt + CALL_GAP_MS;
-  }
-  return until;
+// If the clock time is still ahead, keep it. If we just missed it, ring in
+// 2s — not 2 minutes. The old 2-minute cooldown made a 9:00 call fire at 9:02
+// whenever JS re-synced in the same minute.
+function armAt(clockMs, now) {
+  if (!clockMs || clockMs <= 0) return null;
+  if (clockMs > now + 1_000) return { at: clockMs, catchUp: false };
+  if (now - clockMs > 20 * 60 * 60 * 1000) return null;
+  return { at: now + 2_000, catchUp: true };
 }
 
-function draftCall(item, pending, now, pausedUntil = 0) {
-  const busyUntil = otherInProgressUntil(item, pending);
+function draftStart(item, now, pausedUntil) {
+  if (item.startedAt) return null;
+  const scheduled = startMillis(item.scheduledAt);
+  const snooze = parseMillis(item.snoozeUntil);
+  const clock = Math.max(scheduled, snooze);
+  const armed = armAt(clock, now);
+  if (!armed) return null;
+  return {
+    item,
+    phase: "start",
+    at: clampPause(armed.at, now, pausedUntil),
+    flexible: !!snooze,
+    catchUp: armed.catchUp,
+  };
+}
 
-  if (item.startedAt) {
-    let at = Math.max(endTimeMillis(item), parseMillis(item.followUpUntil));
-    // Full duration from "I'm ready" — never pull this forward to make room
-    // for the next task. Later start-calls wait via otherInProgressUntil.
-    if (at <= now + 1_000) at = now + AFTER_CALL_COOLDOWN_MS;
-    at = clampPause(at, now, pausedUntil);
-    return { item, phase: "end", at, flexible: !!item.followUpUntil };
-  }
+function draftEnd(item, now, pausedUntil) {
+  const durationMs = durationOf(item) * 60 * 1000;
+  if (durationMs <= 0) return null;
+  const scheduledStart = startMillis(item.scheduledAt);
+  const scheduledEnd = scheduledStart > 0 ? scheduledStart + durationMs : 0;
+  // "I'm ready" owns the remaining duration. If they never started, the
+  // scheduled slot still gets a "did you finish?" ring (9:00 + 30m → 9:30).
+  const startedEnd = item.startedAt ? endTimeMillis(item) : 0;
+  const followUp = parseMillis(item.followUpUntil);
+  const clock = Math.max(scheduledEnd, startedEnd, followUp);
+  const armed = armAt(clock, now);
+  if (!armed) return null;
+  return {
+    item,
+    phase: "end",
+    at: clampPause(armed.at, now, pausedUntil),
+    flexible: !!followUp,
+    catchUp: armed.catchUp,
+  };
+}
 
-  let at = Math.max(startMillis(item.scheduledAt), parseMillis(item.snoozeUntil));
-  if (at <= now + 1_000) {
-    const recentlyDue = startMillis(item.scheduledAt) > now - 20 * 60 * 60 * 1000;
-    if (parseMillis(item.snoozeUntil) || recentlyDue) at = now + AFTER_CALL_COOLDOWN_MS;
-    else return null;
+function draftsForItem(item, now, pausedUntil) {
+  const start = draftStart(item, now, pausedUntil);
+  const end = draftEnd(item, now, pausedUntil);
+  if (start?.catchUp && end?.catchUp) return [end];
+  if (start && end && Math.abs(start.at - end.at) < 60_000) {
+    return [end.catchUp || start.catchUp ? end : start];
   }
-  at = Math.max(at, busyUntil);
-  at = clampPause(at, now, pausedUntil);
-  return { item, phase: "start", at, flexible: !!item.snoozeUntil };
+  return [start, end].filter(Boolean);
 }
 
 export function nextFreeSlot(desiredAt, occupiedAts, gapMs = CALL_GAP_MS) {
   let at = desiredAt;
   let moved = true;
-  while (moved) {
+  let guard = 0;
+  while (moved && guard < 96) {
+    guard += 1;
     moved = false;
     for (const other of occupiedAts) {
       if (Math.abs(at - other) < gapMs) {
-        at = other + gapMs;
+        const next = other + gapMs;
+        if (next <= at) continue;
+        at = next;
         moved = true;
       }
     }
@@ -76,25 +103,26 @@ export function nextFreeSlot(desiredAt, occupiedAts, gapMs = CALL_GAP_MS) {
   return at;
 }
 
+// Clock-anchored start/end (9:00 and 9:30) must not be shoved around to make
+// room for other tasks. Only snooze / follow-up / missed catch-up may slide.
 function spaceCalls(drafts, now) {
-  const sorted = [...drafts].sort((a, b) => {
-    if (Math.abs(a.at - b.at) >= CALL_GAP_MS) return a.at - b.at;
-    const af = isFlexible(a);
-    const bf = isFlexible(b);
-    if (af !== bf) return af ? 1 : -1;
-    if (a.phase !== b.phase) return a.phase === "end" ? -1 : 1;
-    return a.at - b.at;
-  });
-
-  const placed = [];
-  for (const draft of sorted) {
-    const floor = draft.at > now + AFTER_CALL_COOLDOWN_MS
-      ? now + 2_000
-      : now + AFTER_CALL_COOLDOWN_MS;
-    const at = nextFreeSlot(Math.max(draft.at, floor), placed.map((row) => row.at));
-    placed.push({ ...draft, at });
+  const anchored = [];
+  const floating = [];
+  for (const draft of drafts) {
+    if (draft.catchUp || isFlexible(draft)) floating.push(draft);
+    else anchored.push(draft);
   }
-  return placed;
+
+  const placed = [...anchored];
+  const occupied = placed.map((row) => row.at);
+  floating.sort((a, b) => a.at - b.at);
+  for (const draft of floating) {
+    const floor = draft.catchUp ? now + 2_000 : now + AFTER_CALL_COOLDOWN_MS;
+    const at = nextFreeSlot(Math.max(draft.at, floor), occupied);
+    placed.push({ ...draft, at });
+    occupied.push(at);
+  }
+  return placed.sort((a, b) => a.at - b.at);
 }
 
 function toReminder(draft, { voiceAlerts, name }) {
@@ -122,8 +150,7 @@ export function planTaskCalls(items, { now = Date.now(), voiceAlerts = true, nam
   const pauseMs = Number(pausedUntil) > now ? Number(pausedUntil) : 0;
   const drafts = [];
   for (const item of pending) {
-    const draft = draftCall(item, pending, now, pauseMs);
-    if (draft) drafts.push(draft);
+    drafts.push(...draftsForItem(item, now, pauseMs));
   }
   return spaceCalls(drafts, now).map((draft) => toReminder(draft, { voiceAlerts, name }));
 }

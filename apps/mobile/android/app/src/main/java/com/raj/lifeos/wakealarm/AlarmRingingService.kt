@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -38,15 +39,33 @@ class AlarmRingingService : Service() {
     fun isRinging(): Boolean = ringingFlag
 
     fun stop(context: Context) {
+      ringingFlag = false
       val intent = Intent(context, AlarmRingingService::class.java)
       intent.action = ACTION_STOP
-      context.startService(intent)
+      try {
+        context.startService(intent)
+      } catch (_: Exception) {
+      }
     }
   }
 
   private var ringtone: Ringtone? = null
   private var vibrator: Vibrator? = null
   private var wakeLock: PowerManager.WakeLock? = null
+  private val handler = Handler(Looper.getMainLooper())
+  private var stopping = false
+  private val ringtoneWatch = object : Runnable {
+    override fun run() {
+      if (!ringingFlag || stopping) return
+      val playing = try {
+        ringtone?.isPlaying == true
+      } catch (_: Exception) {
+        false
+      }
+      if (!playing) startRingtone()
+      handler.postDelayed(this, 1500L)
+    }
+  }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -61,6 +80,7 @@ class AlarmRingingService : Service() {
 
   private fun startRinging() {
     if (ringingFlag) return
+    stopping = false
     ringingFlag = true
 
     val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -74,30 +94,46 @@ class AlarmRingingService : Service() {
     }
 
     createChannel()
-    startForeground(NOTIFICATION_ID, buildNotification())
+    try {
+      val notification = buildNotification()
+      if (Build.VERSION.SDK_INT >= 34) {
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+    } catch (_: Exception) {
+      // Still try to ring. Android 14 kills a service that never becomes
+      // foreground, but the type above is what keeps this path alive.
+    }
     startRingtone()
+    handler.removeCallbacks(ringtoneWatch)
+    handler.postDelayed(ringtoneWatch, 1500L)
     startVibration()
-    // Second chance after the FGS is up — some OEMs block the receiver launch
-    // but allow it from a foreground service that just posted a high-priority
-    // full-screen notification.
-    Handler(Looper.getMainLooper()).post { AlarmScheduler.launchWakeScreen(this) }
+    handler.post { AlarmScheduler.launchWakeScreen(this) }
   }
 
   private fun startRingtone() {
+    if (!ringingFlag || stopping) return
+    try {
+      if (ringtone?.isPlaying == true) return
+    } catch (_: Exception) {
+    }
+    try { ringtone?.stop() } catch (_: Exception) {}
+    ringtone = null
     try {
       val uri: Uri = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
         ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-      ringtone = RingtoneManager.getRingtone(this, uri)
-      ringtone?.audioAttributes = AudioAttributes.Builder()
+      val next = RingtoneManager.getRingtone(this, uri) ?: return
+      next.audioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ALARM)
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
         .build()
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        ringtone?.isLooping = true
+        next.isLooping = true
       }
-      ringtone?.play()
+      next.play()
+      ringtone = next
     } catch (_: Exception) {
-      // Vibration still runs even if the ringtone can't be loaded.
     }
   }
 
@@ -121,7 +157,10 @@ class AlarmRingingService : Service() {
   }
 
   private fun stopRinging() {
+    if (stopping) return
+    stopping = true
     ringingFlag = false
+    handler.removeCallbacksAndMessages(null)
     try { ringtone?.stop() } catch (_: Exception) {}
     ringtone = null
     try { vibrator?.cancel() } catch (_: Exception) {}

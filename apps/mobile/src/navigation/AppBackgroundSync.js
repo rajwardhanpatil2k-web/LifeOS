@@ -4,7 +4,7 @@ import * as Notifications from "expo-notifications";
 import { useDispatch, useSelector } from "react-redux";
 import { fetchSettings, fetchToday } from "../store";
 import { loadApiUrl } from "../apiConfig";
-import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, cancelWakeAlarm, nextWakeMillis } from "../wakeAlarm";
+import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, cancelWakeAlarm, nextWakeMillis, wasWakeAlarmJustDismissed } from "../wakeAlarm";
 import { isVoiceAgentAvailable, cancelVoiceCues, speakNow } from "../voiceAgent";
 import { isTaskAlertsAvailable, getActiveTaskCall, isTaskCallRinging, stopTaskAlert, setTaskAlertsPausedUntil } from "../taskAlerts";
 import { ensureRemindersReady, syncDayReminders } from "../reminderSync";
@@ -33,9 +33,26 @@ async function callIsLive() {
 
 async function openWakeAlarmIfRinging() {
   if (!isWakeAlarmAvailable() || !navigationRef.isReady()) return;
+  if (wasWakeAlarmJustDismissed()) return;
   try {
+    if (navigationRef.getCurrentRoute()?.name === "WakeAlarm") return;
     if (await isWakeAlarmRinging()) navigationRef.navigate("WakeAlarm");
   } catch (_e) {}
+}
+
+export function resetToMain() {
+  if (!navigationRef.isReady()) return false;
+  try {
+    navigationRef.reset({ index: 0, routes: [{ name: "Main" }] });
+    return true;
+  } catch (_e) {
+    try {
+      navigationRef.navigate("Main");
+      return true;
+    } catch (_e2) {
+      return false;
+    }
+  }
 }
 
 async function openTaskCallIfRinging() {
@@ -78,12 +95,15 @@ export default function AppBackgroundSync() {
     const until = Number.isFinite(pausedUntil) && pausedUntil > Date.now() ? pausedUntil : 0;
     const timer = setTimeout(async () => {
       try {
-        if (await callIsLive()) return;
-        if (until) stopTaskAlert().catch(() => {});
-        await setTaskAlertsPausedUntil(until).catch(() => {});
+        const live = await callIsLive();
+        // Still arm the 9:30 end-call while a 9:00 start-call is on screen.
+        // Skipping this used to leave no end alarm after "I'm ready".
+        if (!live) {
+          if (until) stopTaskAlert().catch(() => {});
+          await setTaskAlertsPausedUntil(until).catch(() => {});
+        }
         await syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
       } catch (_e) {
-        if (await callIsLive()) return;
         syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
       }
     }, 500);

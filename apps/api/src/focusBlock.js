@@ -70,11 +70,15 @@ function isStaleMeal(item, untilMs, dateStr) {
 function nextFreeSlot(desiredAt, occupiedAts, gapMs = CALL_GAP_MS) {
   let at = desiredAt;
   let moved = true;
-  while (moved) {
+  let guard = 0;
+  while (moved && guard < 96) {
+    guard += 1;
     moved = false;
     for (const other of occupiedAts) {
       if (Math.abs(at - other) < gapMs) {
-        at = other + gapMs;
+        const next = other + gapMs;
+        if (!(next > at)) continue;
+        at = next;
         moved = true;
       }
     }

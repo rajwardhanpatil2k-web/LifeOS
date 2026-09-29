@@ -64,6 +64,22 @@ describe("skipRemainingToday", () => {
     assert.equal(result.skipped.length, 1);
     assert.equal(result.kept.length, 1);
   });
+
+  it("keeps the locked tomorrow-prep reminder", () => {
+    const prep = item({
+      _id: "p",
+      key: "tomorrow-prep",
+      title: "Get tomorrow's food ready",
+      scheduledAt: "20:00",
+      locked: true,
+    });
+    const workout = item({ _id: "1", key: "workout", title: "Workout", scheduledAt: "07:00" });
+    const result = skipRemainingToday({ items: [workout, prep] }, "busy");
+    assert.equal(prep.status, "pending");
+    assert.equal(workout.status, "skipped");
+    assert.equal(result.skipped.length, 1);
+    assert.equal(result.kept.length, 1);
+  });
 });
 
 describe("skipSelected and skipNamed", () => {
