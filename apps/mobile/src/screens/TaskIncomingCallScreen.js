@@ -5,14 +5,14 @@ import { useDispatch, useSelector } from "react-redux";
 import { colors, domainMeta } from "../theme";
 import { completeItem, fetchToday, markItemReady, remindLaterItem, snoozeItem } from "../store";
 import {
-  cancelSpeakPrompt,
+  armAlarmSession,
   clearTaskCallOverride,
   setTaskCallUiVisible,
   silenceTaskAlert,
   snoozeTaskCall,
   speakTaskPrompt,
   startTaskCallListening,
-  stopTaskAlert,
+  stopAlarmSession as stopAlarmSessionNative,
   stopTaskCallListening,
   subscribeTaskCallSpeech,
 } from "../taskAlerts";
@@ -48,9 +48,10 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   const [stage, setStage] = useState(truthyParam(params.pickedUp) ? "confirm" : "ringing");
   const [heard, setHeard] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy] = useState(false);
   const [voicePhase, setVoicePhase] = useState("idle");
   const finished = useRef(false);
+  const dismissedRef = useRef(false);
   const sessionRef = useRef(0);
   const promptRef = useRef("");
   const voicePhaseRef = useRef(voicePhase);
@@ -60,13 +61,16 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   const stageRef = useRef(stage);
   stageRef.current = stage;
 
-  const hangUp = useCallback(() => {
-    sessionRef.current += 1;
-    stopTaskCallListening().catch(() => {});
-    cancelSpeakPrompt().catch(() => {});
-    setVoicePhase("idle");
-    if (finished.current) return;
+  const stopAlarmSession = useCallback(() => {
+    if (dismissedRef.current) return Promise.resolve();
+    dismissedRef.current = true;
     finished.current = true;
+    sessionRef.current += 1;
+    if (listenTimer.current) {
+      clearTimeout(listenTimer.current);
+      listenTimer.current = null;
+    }
+    setVoicePhase("idle");
     const goMain = () => {
       if (goMain.done) return;
       goMain.done = true;
@@ -76,8 +80,17 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
         if (navigation.canGoBack()) navigation.goBack();
       }
     };
-    stopTaskAlert().catch(() => {}).finally(goMain);
-    setTimeout(goMain, 900);
+    const closed = Promise.resolve()
+      .then(() => stopAlarmSessionNative())
+      .catch(() => {})
+      .finally(goMain);
+    const backup = new Promise((resolve) => {
+      setTimeout(() => {
+        goMain();
+        resolve();
+      }, 900);
+    });
+    return Promise.race([closed, backup]);
   }, [navigation]);
 
   useEffect(() => {
@@ -88,7 +101,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   useEffect(() => {
     setTaskCallUiVisible(true).catch(() => {});
     const sub = AppState.addEventListener("change", (next) => {
-      if (finished.current) return;
+      if (dismissedRef.current || finished.current) return;
       if (next === "active") setTaskCallUiVisible(true).catch(() => {});
     });
     return () => sub.remove();
@@ -96,29 +109,42 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   useEffect(() => {
     if (!item) return;
-    if (item.status === "done" || item.status === "skipped") hangUp();
-  }, [item, hangUp]);
+    if (item.status === "done" || item.status === "skipped") stopAlarmSession().catch(() => {});
+  }, [item, stopAlarmSession]);
 
   useEffect(() => {
     return () => {
       if (listenTimer.current) clearTimeout(listenTimer.current);
-      stopTaskCallListening().catch(() => {});
+      if (!dismissedRef.current) stopTaskCallListening().catch(() => {});
     };
   }, []);
 
+  const beginListeningRef = useRef(async () => {});
+
+  const scheduleListen = useCallback((delayMs) => {
+    if (dismissedRef.current || finished.current) return;
+    if (listenTimer.current) clearTimeout(listenTimer.current);
+    listenTimer.current = setTimeout(() => {
+      listenTimer.current = null;
+      if (dismissedRef.current || finished.current || stageRef.current !== "confirm") return;
+      beginListeningRef.current(sessionRef.current);
+    }, delayMs);
+  }, []);
+
   const beginListening = useCallback(async (session) => {
-    if (finished.current || session !== sessionRef.current) return;
+    if (dismissedRef.current || finished.current || session !== sessionRef.current) return;
     if (stageRef.current !== "confirm") return;
     setHeard("");
     setVoicePhase("listening");
     try {
-      await startTaskCallListening();
+      const started = await startTaskCallListening();
+      if (started === false || dismissedRef.current) return;
     } catch (_e) {
-      listenTimer.current = setTimeout(() => {
-        if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
-      }, 900);
+      if (dismissedRef.current || finished.current) return;
+      scheduleListen(900);
     }
-  }, []);
+  }, [scheduleListen]);
+  beginListeningRef.current = beginListening;
 
   useEffect(() => {
     if (stage !== "confirm") return undefined;
@@ -130,14 +156,16 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     setHeard("");
     setVoicePhase("speaking");
     (async () => {
+      await armAlarmSession().catch(() => {});
+      if (dismissedRef.current || finished.current || session !== sessionRef.current) return;
       await silenceTaskAlert().catch(() => {});
-      if (finished.current || session !== sessionRef.current) return;
+      if (dismissedRef.current || finished.current || session !== sessionRef.current) return;
       await speakTaskPrompt(prompt).catch(() => {});
-      if (finished.current || session !== sessionRef.current) return;
+      if (dismissedRef.current || finished.current || session !== sessionRef.current) return;
       await new Promise((resolve) => {
         listenTimer.current = setTimeout(resolve, 1100);
       });
-      if (finished.current || session !== sessionRef.current) return;
+      if (dismissedRef.current || finished.current || session !== sessionRef.current) return;
       await beginListening(session);
     })();
     // Speak/listen once per pickup. Re-running when today data refreshes
@@ -146,7 +174,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   }, [beginListening, stage]);
 
   const enterConfirm = useCallback(() => {
-    if (finished.current) return;
+    if (dismissedRef.current || finished.current) return;
     silenceTaskAlert().catch(() => {});
     if (stageRef.current === "confirm") return;
     stageRef.current = "confirm";
@@ -158,8 +186,7 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
   }, [enterConfirm, params.pickedUp]);
 
   const rejectCall = useCallback(async (overrideMinutes) => {
-    if (finished.current) return;
-    setBusy(true);
+    if (dismissedRef.current) return;
     const requested = Number(overrideMinutes) > 0
       ? Number(overrideMinutes)
       : phase === "end"
@@ -168,44 +195,42 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
     const resolved = resolveCallDelay(todayItems, { itemId, minutes: requested });
     const minutes = resolved.minutes;
     const payload = item || { _id: itemId, title, domain, durationMin, alertLevel: params.alertLevel };
-    snoozeTaskCall(payload, { phase, minutes, items: todayItems }).catch(() => {});
-    if (!isPreview && itemId) {
-      try {
-        if (phase === "end") await dispatch(remindLaterItem({ itemId, minutes })).unwrap();
-        else await dispatch(snoozeItem({ itemId, minutes })).unwrap();
-      } catch (_e) {}
-    }
-    hangUp();
-  }, [dispatch, domain, durationMin, hangUp, item, itemId, isPreview, params.alertLevel, phase, title, todayItems]);
+    try {
+      await stopAlarmSession();
+      await snoozeTaskCall(payload, { phase, minutes, items: todayItems });
+      if (!isPreview && itemId) {
+        const action = phase === "end"
+          ? remindLaterItem({ itemId, minutes })
+          : snoozeItem({ itemId, minutes });
+        await dispatch(action).unwrap();
+      }
+    } catch (_e) {}
+  }, [dispatch, domain, durationMin, item, itemId, isPreview, params.alertLevel, phase, stopAlarmSession, title, todayItems]);
 
   const acceptReady = useCallback(async () => {
-    if (finished.current) return;
-    setBusy(true);
-    if (!isPreview && itemId) {
-      try {
-        await dispatch(markItemReady(itemId)).unwrap();
-        await clearTaskCallOverride(itemId);
-      } catch (_e) {}
-    }
-    hangUp();
-  }, [dispatch, hangUp, itemId, isPreview]);
+    if (dismissedRef.current) return;
+    try {
+      await stopAlarmSession();
+      if (isPreview || !itemId) return;
+      await dispatch(markItemReady(itemId)).unwrap();
+      await clearTaskCallOverride(itemId);
+    } catch (_e) {}
+  }, [dispatch, itemId, isPreview, stopAlarmSession]);
 
   const acceptComplete = useCallback(async () => {
-    if (finished.current) return;
-    setBusy(true);
-    if (!isPreview && itemId) {
-      try {
-        await dispatch(completeItem({ itemId, source: "task_call" })).unwrap();
-        await clearTaskCallOverride(itemId);
-        dispatch(fetchToday());
-      } catch (_e) {}
-    }
-    hangUp();
-  }, [dispatch, hangUp, itemId, isPreview]);
+    if (dismissedRef.current) return;
+    try {
+      await stopAlarmSession();
+      if (isPreview || !itemId) return;
+      await dispatch(completeItem({ itemId, source: "task_call" })).unwrap();
+      await clearTaskCallOverride(itemId);
+      await dispatch(fetchToday());
+    } catch (_e) {}
+  }, [dispatch, itemId, isPreview, stopAlarmSession]);
 
   useEffect(() => {
     return subscribeTaskCallSpeech((event) => {
-      if (stageRef.current !== "confirm" || finished.current) return;
+      if (dismissedRef.current || finished.current || stageRef.current !== "confirm") return;
       if (event?.type === "ready") {
         setVoicePhase("listening");
         return;
@@ -214,14 +239,12 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       const alternatives = Array.isArray(event?.alternatives) ? event.alternatives : [];
       if (event?.type === "partial" || event?.type === "result") setHeard(text);
       if (event?.type === "error") {
-        if (voicePhaseRef.current === "speaking") return;
-        listenTimer.current = setTimeout(() => {
-          if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
-        }, 800);
+        if (voicePhaseRef.current === "speaking" || dismissedRef.current) return;
+        scheduleListen(800);
         return;
       }
       if (event?.type !== "result") return;
-      if (voicePhaseRef.current === "speaking") return;
+      if (voicePhaseRef.current === "speaking" || dismissedRef.current) return;
       const meaning = interpretCallReplies(
         [text, ...alternatives],
         phase === "end" ? "complete" : "ready",
@@ -232,13 +255,9 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       else if (meaning === "snooze") rejectCall(deferMin || undefined);
       else if (meaning === "complete") acceptComplete();
       else if (meaning === "remind") rejectCall(deferMin || undefined);
-      else {
-        listenTimer.current = setTimeout(() => {
-          if (!finished.current && stageRef.current === "confirm") beginListening(sessionRef.current);
-        }, 400);
-      }
+      else scheduleListen(400);
     });
-  }, [acceptComplete, acceptReady, beginListening, busy, phase, rejectCall]);
+  }, [acceptComplete, acceptReady, phase, rejectCall, scheduleListen]);
 
   const subtitle = phase === "end"
     ? "Time's up — did you finish?"

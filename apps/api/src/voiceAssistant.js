@@ -27,6 +27,7 @@ const {
   skipNamed,
   previewForSkip,
 } = require("./skipTasks");
+const { detectShift, isBlanketShift, applyTaskShift } = require("./shiftTasks");
 
 const DOMAINS = LIFE_AREAS.map((area) => area.key);
 
@@ -69,11 +70,22 @@ const ASSISTANT_SCHEMA = {
     "durationTaskMin",
     "domain",
     "step",
+    "offsetMin",
+    "taskIds",
   ],
   properties: {
     intent: {
       type: "string",
-      enum: ["add_task", "pause_focus", "defer_task", "resume_focus", "extend_focus", "skip_tasks", "unknown"],
+      enum: [
+        "add_task",
+        "pause_focus",
+        "defer_task",
+        "resume_focus",
+        "extend_focus",
+        "skip_tasks",
+        "shift_tasks",
+        "unknown",
+      ],
     },
     skipScope: {
       type: "string",
@@ -90,6 +102,8 @@ const ASSISTANT_SCHEMA = {
     durationTaskMin: { type: "integer" },
     domain: { type: "string" },
     step: { type: "string" },
+    offsetMin: { type: "integer" },
+    taskIds: { type: "array", items: { type: "string" } },
   },
 };
 
@@ -187,6 +201,15 @@ function parseExtendMin(transcript) {
 
 function fallbackAssistant(transcript, { itemIds = [] } = {}) {
   const lower = String(transcript || "").toLowerCase().replace(/['’]/g, "");
+  const shift = detectShift(transcript);
+  if (shift) {
+    return {
+      intent: "shift_tasks",
+      offsetMin: shift.offsetMin,
+      taskIds: [],
+      confidence: 0.94,
+    };
+  }
   const skip = detectSkipScope(transcript, itemIds);
   if (skip) {
     return {
@@ -258,6 +281,12 @@ function normalizeParsed(data, fallback) {
         : 30,
     domain,
     step: String(data?.step || data?.title || "").trim(),
+    offsetMin: Number.isFinite(data?.offsetMin)
+      ? Math.round(data.offsetMin)
+      : (Number.isFinite(fallback.offsetMin) ? fallback.offsetMin : 0),
+    taskIds: Array.isArray(data?.taskIds)
+      ? data.taskIds.map((id) => String(id)).filter(Boolean)
+      : (Array.isArray(fallback.taskIds) ? fallback.taskIds : []),
   };
 }
 
@@ -266,14 +295,22 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   const nowHHMM = hhmmIST();
   const pending = (plan.items || [])
     .filter((item) => item.status === "pending")
-    .map((item) => `${item.title} (${item.scheduledAt}, ${item.domain})`)
-    .slice(0, 16)
-    .join("; ");
+    .map((item) => {
+      const id = String(item._id || item.originKey || item.key || "");
+      return `${id} | ${item.title} | ${item.scheduledAt || "unscheduled"}`;
+    })
+    .slice(0, 24)
+    .join("\n");
 
   const parsed = await chatJson({
     system:
       "You classify a spoken Life OS request for today in Asia/Kolkata. " +
       `Current time in Asia/Kolkata is ${nowHHMM}. ` +
+      "Each pending task is `id | title | HH:MM`. Use those ids. Never invent an id or a new copy of an existing title. " +
+      "shift_tasks = move EXISTING remaining tasks by an offset. " +
+      "offsetMin is minutes (60 = one hour later, -60 = one hour earlier). " +
+      "taskIds lists the ids to move; leave it empty to move every remaining task. " +
+      "Do not use add_task when they say shift, move, push, or reschedule existing tasks. " +
       "skip_tasks = they will NOT do remaining or selected tasks today (festival, meeting, visiting, busy with other work). " +
       "skipScope is today (all remaining), selected (the tasks they highlighted), or named (one task by title). " +
       "reason is why they skipped, for later insights. " +
@@ -282,13 +319,13 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
       "until is HH:MM 24h if they named a clock, else empty. " +
       "defer_task = remind/alert about an EXISTING task in N minutes. " +
       "resume_focus = I'm back, turn alarms on. extend_focus = add more mute time. " +
-      "add_task = create a new calendar task. " +
+      "add_task = create a brand-new calendar task that is not already on the list. " +
       "For add_task, scheduledAt is 24-hour HH:MM. Keep the exact minute they said; 'around' does not mean round the clock. " +
       "If they name a clock without AM/PM, pick the NEXT upcoming occurrence today " +
       `(example: now ${nowHHMM} and 'around 9:56' is the next 09:56 or 21:56 that has not passed). ` +
-      "Skip wins over pause when they say skip / not doing / cancel today's tasks. " +
+      "Shift wins over add_task. Skip wins over pause when they say skip / not doing / cancel today's tasks. " +
       "Do not turn a haircut/outside/DND request into add_task.",
-    user: `Pending tasks: ${pending || "none"}\nSelected task ids: ${(itemIds || []).join(", ") || "none"}\nSpoken: ${String(transcript || "").trim()}`,
+    user: `Pending tasks:\n${pending || "none"}\nSelected task ids: ${(itemIds || []).join(", ") || "none"}\nSpoken: ${String(transcript || "").trim()}`,
     schema: ASSISTANT_SCHEMA,
     schemaName: "lifeos_assistant",
     maxTokens: 280,
@@ -296,6 +333,15 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   });
 
   const merged = normalizeParsed(parsed?.data, fallback);
+  if (fallback.intent === "shift_tasks") {
+    return {
+      ...merged,
+      intent: "shift_tasks",
+      offsetMin: fallback.offsetMin || merged.offsetMin || 0,
+      taskIds: isBlanketShift(transcript) ? [] : (merged.taskIds || []),
+      confidence: Math.max(merged.confidence || 0, fallback.confidence || 0),
+    };
+  }
   if (merged.intent === "add_task" || fallback.intent === "add_task") {
     const spokenAt = parseSpokenClock(transcript, nowHHMM);
     if (spokenAt) merged.scheduledAt = spokenAt;
@@ -384,6 +430,25 @@ async function runAssistant(user, plan, transcript, { itemIds = [] } = {}) {
     };
   }
 
+  if (parsed.intent === "shift_tasks") {
+    const spoken = detectShift(transcript);
+    const offsetMin = spoken?.offsetMin || parsed.offsetMin;
+    const result = await applyTaskShift(user, plan, {
+      offsetMin,
+      taskIds: isBlanketShift(transcript) ? [] : parsed.taskIds,
+      nowHHMM: hhmmIST(),
+    });
+    if (!result.ok) {
+      return { intent: "unknown", parsed, error: result.error || "Nothing left to shift." };
+    }
+    return {
+      intent: "shift_tasks",
+      parsed: { ...parsed, offsetMin: result.offsetMin },
+      preview: result.preview,
+      shifted: result.shifted,
+    };
+  }
+
   if (parsed.intent === "defer_task") {
     const item = resolveDeferItem(plan, parsed.titleQuery);
     if (!item) {
@@ -424,7 +489,7 @@ async function runAssistant(user, plan, transcript, { itemIds = [] } = {}) {
   return {
     intent: "unknown",
     parsed,
-    error: "I can add a task, pause alarms, skip tasks, or remind you later.",
+    error: "I can add a task, shift remaining tasks, pause alarms, skip tasks, or remind you later.",
   };
 }
 
@@ -434,4 +499,5 @@ module.exports = {
   fallbackAssistant,
   parseAssistantRequest,
   runAssistant,
+  detectShift,
 };

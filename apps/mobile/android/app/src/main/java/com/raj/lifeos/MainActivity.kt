@@ -63,6 +63,30 @@ class MainActivity : ReactActivity() {
 
   // Drop lock-screen overlay flags after the wake QR is scanned so Today is
   // a normal app screen instead of staying pinned over the keyguard.
+  fun clearTaskCallOverlay() {
+    val data = intent?.data?.toString()
+    val isTaskCall = data != null && data.startsWith(com.raj.lifeos.taskalert.TaskCallIntents.URI_PREFIX)
+    if (!isTaskCall) return
+    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+      setShowWhenLocked(false)
+      setTurnScreenOn(false)
+    } else {
+      @Suppress("DEPRECATION")
+      window.clearFlags(
+        WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+          WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+      )
+    }
+    try {
+      val next = Intent(intent)
+      next.data = null
+      setIntent(next)
+    } catch (_: Exception) {
+    }
+  }
+
   fun clearWakeOverlayFlags() {
     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {

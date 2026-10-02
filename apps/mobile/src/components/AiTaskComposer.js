@@ -3,6 +3,7 @@ import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View 
 import { Ionicons } from "@expo/vector-icons";
 import { useDispatch } from "react-redux";
 import { addVoiceTask } from "../store";
+import { clearTaskCallOverride } from "../taskAlerts";
 import { formatClock12 } from "../formatTime";
 import { useTheme } from "../hooks/useTheme";
 import {
@@ -45,6 +46,9 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
       setError("");
       try {
         const result = await dispatch(addVoiceTask({ transcript: text, itemIds: selectedIds })).unwrap();
+        if (result.intent === "shift_tasks" && Array.isArray(result.shifted)) {
+          await Promise.all(result.shifted.map((row) => clearTaskCallOverride(row.id).catch(() => {})));
+        }
         setPreview(result.preview || result.parsed || result.item);
         setPhase(result.intent || "done");
         if (result.intent === "skip_tasks") onConsumed?.();
@@ -122,9 +126,11 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
                         ? "I'll alert you"
                         : phase === "skip_tasks"
                           ? "Skipped"
-                          : phase === "add_task" || phase === "done"
-                            ? "Added for today"
-                            : "What should I do?"}
+                          : phase === "shift_tasks"
+                            ? "Schedule updated"
+                            : phase === "add_task" || phase === "done"
+                              ? "Added for today"
+                              : "What should I do?"}
             </Text>
             <Text style={styles.sheetHint}>
               {selectedCount

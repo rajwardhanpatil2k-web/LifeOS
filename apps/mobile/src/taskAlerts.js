@@ -185,3 +185,19 @@ export async function stopTaskCallListening() {
   if (!available || !TaskReminderModule.stopListening) return false;
   return TaskReminderModule.stopListening();
 }
+
+// Opens a fresh call session so a previous Ready/Snooze cannot keep the mic shut.
+export async function armAlarmSession() {
+  if (!available || !TaskReminderModule.armAlarmSession) return false;
+  return TaskReminderModule.armAlarmSession();
+}
+
+// Stops ringtone, TTS, and speech recognition, then drops the call overlay.
+// Safe to call twice: native work no-ops once the session is already closed.
+export async function stopAlarmSession() {
+  if (!available) return false;
+  if (TaskReminderModule.stopAlarmSession) return TaskReminderModule.stopAlarmSession();
+  await cancelSpeakPrompt().catch(() => {});
+  await stopTaskCallListening().catch(() => {});
+  return stopTaskAlert();
+}

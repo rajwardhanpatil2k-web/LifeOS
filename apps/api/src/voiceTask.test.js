@@ -65,4 +65,14 @@ describe("fallbackAssistant clock vs defer", () => {
     assert.equal(fallbackAssistant(CREAM).intent, "add_task");
     assert.equal(fallbackAssistant("alert me after 30 minutes").intent, "defer_task");
   });
+
+  it("shifts remaining tasks instead of adding or pausing when the user is busy", () => {
+    const parsed = fallbackAssistant("Shift my remaining tasks 1 hour ahead, I'm busy right now.");
+    assert.equal(parsed.intent, "shift_tasks");
+    assert.equal(parsed.offsetMin, 60);
+  });
+
+  it("still pauses a plain do-not-disturb request", () => {
+    assert.equal(fallbackAssistant("I'm busy for two hours, don't disturb me").intent, "pause_focus");
+  });
 });

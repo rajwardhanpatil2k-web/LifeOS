@@ -30,6 +30,9 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   private var promptTtsReady = false
   private var pendingPrompt: String? = null
   private var speakPromise: Promise? = null
+  private var dismissed = false
+  private var recognizerEpoch = 0
+  private var speakEpoch = 0
 
   override fun getName(): String = "TaskReminderModule"
 
@@ -226,9 +229,38 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   }
 
   @ReactMethod
+  fun armAlarmSession(promise: Promise) {
+    mainHandler.post {
+      dismissed = false
+      recognizerEpoch += 1
+      promise.resolve(true)
+    }
+  }
+
+  @ReactMethod
+  fun stopAlarmSession(promise: Promise) {
+    mainHandler.post {
+      dismissed = true
+      stopPromptPlayback()
+      stopRecognizer()
+      try {
+        TaskAlertService.stop(reactApplicationContext)
+      } catch (_: Exception) {
+      }
+      clearTaskCallOverlay()
+      promise.resolve(true)
+    }
+  }
+
+  @ReactMethod
   fun speakPrompt(text: String, promise: Promise) {
     mainHandler.post {
       try {
+        if (dismissed) {
+          promise.resolve(true)
+          return@post
+        }
+        val epoch = speakEpoch
         pauseRecognizer()
         speakPromise?.resolve(true)
         speakPromise = promise
@@ -241,6 +273,13 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
         armSpeakTimeout()
         if (promptTts == null) {
           promptTts = TextToSpeech(reactApplicationContext) { status ->
+            if (dismissed || epoch != speakEpoch) {
+              promptTtsReady = false
+              try { promptTts?.shutdown() } catch (_: Exception) {}
+              promptTts = null
+              finishSpeak(true)
+              return@TextToSpeech
+            }
             if (status != TextToSpeech.SUCCESS) {
               promptTts = null
               promptTtsReady = false
@@ -263,17 +302,26 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
             )
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
               override fun onStart(utteranceId: String?) {
-                armSpeakTimeout()
+                if (!dismissed && epoch == speakEpoch) armSpeakTimeout()
               }
               override fun onDone(utteranceId: String?) {
-                mainHandler.postDelayed({ finishSpeak(true) }, 450L)
+                mainHandler.postDelayed({
+                  if (dismissed || epoch != speakEpoch) return@postDelayed
+                  finishSpeak(true)
+                }, 450L)
               }
               @Deprecated("Deprecated in Java")
               override fun onError(utteranceId: String?) {
-                mainHandler.post { finishSpeak(false) }
+                mainHandler.post {
+                  if (dismissed || epoch != speakEpoch) return@post
+                  finishSpeak(false)
+                }
               }
               override fun onError(utteranceId: String?, errorCode: Int) {
-                mainHandler.post { finishSpeak(false) }
+                mainHandler.post {
+                  if (dismissed || epoch != speakEpoch) return@post
+                  finishSpeak(false)
+                }
               }
             })
             promptTtsReady = true
@@ -292,9 +340,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun cancelSpeak(promise: Promise) {
     mainHandler.post {
-      pendingPrompt = null
-      try { promptTts?.stop() } catch (_: Exception) {}
-      finishSpeak(true)
+      stopPromptPlayback()
       promise.resolve(true)
     }
   }
@@ -347,34 +393,45 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   fun startListening(promise: Promise) {
     mainHandler.post {
       try {
+        if (dismissed) {
+          promise.resolve(false)
+          return@post
+        }
         pauseRecognizer()
         if (!SpeechRecognizer.isRecognitionAvailable(reactApplicationContext)) {
           promise.reject("SPEECH_UNAVAILABLE", "Speech recognition is not available on this device")
           return@post
         }
+        val epoch = recognizerEpoch
+        val live = booleanArrayOf(false)
         val host = currentActivity ?: reactApplicationContext
         val engine = recognizer ?: SpeechRecognizer.createSpeechRecognizer(host)
         recognizer = engine
+        fun liveSession(): Boolean = live[0] && !dismissed && epoch == recognizerEpoch
         engine.setRecognitionListener(object : RecognitionListener {
           override fun onReadyForSpeech(params: Bundle?) {
-            emit("TaskCallSpeech", "ready", "")
+            if (liveSession()) emit("TaskCallSpeech", "ready", "")
           }
           override fun onBeginningOfSpeech() {}
           override fun onRmsChanged(rmsdB: Float) {}
           override fun onBufferReceived(buffer: ByteArray?) {}
           override fun onEndOfSpeech() {
-            emit("TaskCallSpeech", "end", "")
+            if (liveSession()) emit("TaskCallSpeech", "end", "")
           }
           override fun onError(error: Int) {
             listening = false
+            if (!liveSession()) return
+            if (error == SpeechRecognizer.ERROR_CLIENT) return
             emit("TaskCallSpeech", "error", error.toString())
           }
           override fun onResults(results: Bundle?) {
             listening = false
+            if (!liveSession()) return
             val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
             emit("TaskCallSpeech", "result", spoken.firstOrNull().orEmpty(), spoken)
           }
           override fun onPartialResults(partialResults: Bundle?) {
+            if (!liveSession()) return
             val spoken = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
             val first = spoken.firstOrNull().orEmpty()
             if (first.isNotBlank()) emit("TaskCallSpeech", "partial", first, spoken)
@@ -394,6 +451,11 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
         intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
         mainHandler.postDelayed({
           try {
+            if (dismissed || epoch != recognizerEpoch) {
+              promise.resolve(false)
+              return@postDelayed
+            }
+            live[0] = true
             listening = true
             engine.startListening(intent)
             promise.resolve(true)
@@ -432,7 +494,28 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
     mainHandler.postDelayed(speakTimeout!!, 20_000L)
   }
 
+  private fun stopPromptPlayback() {
+    speakEpoch += 1
+    pendingPrompt = null
+    speakTimeout?.let { mainHandler.removeCallbacks(it) }
+    speakTimeout = null
+    try { promptTts?.stop() } catch (_: Exception) {}
+    try { promptTts?.shutdown() } catch (_: Exception) {}
+    promptTts = null
+    promptTtsReady = false
+    finishSpeak(true)
+  }
+
+  private fun clearTaskCallOverlay() {
+    val activity = reactApplicationContext.currentActivity as? com.raj.lifeos.MainActivity ?: return
+    activity.runOnUiThread { activity.clearTaskCallOverlay() }
+  }
+
   private fun speakPendingPrompt() {
+    if (dismissed) {
+      finishSpeak(true)
+      return
+    }
     val text = pendingPrompt ?: return
     pendingPrompt = null
     val engine = promptTts ?: return finishSpeak(false)
@@ -455,6 +538,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   }
 
   private fun pauseRecognizer() {
+    recognizerEpoch += 1
     listening = false
     try { recognizer?.stopListening() } catch (_: Exception) {}
     try { recognizer?.cancel() } catch (_: Exception) {}
@@ -467,6 +551,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   }
 
   private fun emit(event: String, type: String, text: String, alternatives: List<String> = emptyList()) {
+    if (dismissed) return
     try {
       val map = Arguments.createMap()
       map.putString("type", type)

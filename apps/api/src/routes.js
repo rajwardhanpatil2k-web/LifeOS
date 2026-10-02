@@ -716,7 +716,9 @@ function registerRoutes(app) {
               ? "defer_item"
               : result.intent === "skip_tasks"
                 ? "skip_day"
-                : "add_voice_task";
+                : result.intent === "shift_tasks"
+                  ? "shift_tasks"
+                  : "add_voice_task";
     await LifeEvent.create({
       userId: user._id,
       date,
@@ -732,6 +734,8 @@ function registerRoutes(app) {
         skipScope: result.parsed?.skipScope,
         skippedCount: Array.isArray(result.skipped) ? result.skipped.length : 0,
         skippedKeys: (result.skipped || []).map((item) => item.key).filter(Boolean),
+        offsetMin: result.parsed?.offsetMin,
+        shiftedIds: (result.shifted || []).map((item) => item.id).filter(Boolean),
       },
       source: "ai",
     });
@@ -747,6 +751,7 @@ function registerRoutes(app) {
       item: result.item || null,
       parsed: result.parsed,
       preview: result.preview,
+      shifted: result.shifted || [],
       items: plan.items,
       score: scored,
       next: nextAction(plan.items, nowHHMM()),
