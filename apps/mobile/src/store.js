@@ -1,5 +1,7 @@
 import { configureStore, createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { api } from "./api";
+import { isTaskCallRinging, setTaskAlertsPausedUntil, stopTaskAlert } from "./taskAlerts";
+import { AI_MUTE_GRACE_MS, AI_MUTE_LEASE_MS } from "./taskCallConfig";
 
 let mutationEpoch = 0;
 let inflightMutations = 0;
@@ -399,11 +401,53 @@ const insightsSlice = createSlice({
 
 export const { setInsightPeriod, setInsightDate } = insightsSlice.actions;
 
+// Local, short-lived "the user is talking to the AI" mute. Separate from the
+// server-side focus block: nothing is persisted, and it only gates task calls.
+const aiMuteSlice = createSlice({
+  name: "aiMute",
+  initialState: { until: 0 },
+  reducers: {
+    setAiMuteUntil(state, action) {
+      state.until = Number(action.payload) > 0 ? Number(action.payload) : 0;
+    },
+    expireAiMute(state) {
+      if (state.until && state.until <= Date.now()) state.until = 0;
+    },
+  },
+});
+
+export const { setAiMuteUntil, expireAiMute } = aiMuteSlice.actions;
+
+// Opening (or renewing) the AI sheet: stop anything ringing right now and
+// hold off native task calls immediately. Don't wait for the 500ms debounced
+// resync in AppBackgroundSync — an alarm due this second would still ring.
+export const beginAiMute = createAsyncThunk("aiMute/begin", async (_arg, { dispatch }) => {
+  const until = Date.now() + AI_MUTE_LEASE_MS;
+  dispatch(setAiMuteUntil(until));
+  try {
+    if (await isTaskCallRinging()) await stopTaskAlert();
+  } catch (_e) {
+    // best effort
+  }
+  await setTaskAlertsPausedUntil(until).catch(() => {});
+  return until;
+});
+
+// Sheet closed: keep a short grace window, then AppBackgroundSync's expiry
+// timer clears it and replans, so alarms that came due while the user was
+// talking ring one at a time instead of all at once.
+export const endAiMute = createAsyncThunk("aiMute/end", async (_arg, { dispatch }) => {
+  const until = Date.now() + AI_MUTE_GRACE_MS;
+  dispatch(setAiMuteUntil(until));
+  return until;
+});
+
 export const store = configureStore({
   reducer: {
     today: todaySlice.reducer,
     day: daySlice.reducer,
     settings: settingsSlice.reducer,
     insights: insightsSlice.reducer,
+    aiMute: aiMuteSlice.reducer,
   },
 });

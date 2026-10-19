@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import { useDispatch, useSelector } from "react-redux";
-import { fetchSettings, fetchToday } from "../store";
+import { expireAiMute, fetchSettings, fetchToday } from "../store";
 import { loadApiUrl } from "../apiConfig";
 import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, cancelWakeAlarm, nextWakeMillis, wasWakeAlarmJustDismissed } from "../wakeAlarm";
 import { isVoiceAgentAvailable, cancelVoiceCues, speakNow } from "../voiceAgent";
@@ -74,8 +74,24 @@ export default function AppBackgroundSync() {
   const userName = useSelector((s) => s.settings.name);
   const todayItems = useSelector((s) => s.today.data?.items);
   const focusBlock = useSelector((s) => s.today.data?.focusBlock);
-  const pausedUntil = focusBlock?.active && focusBlock?.until ? Date.parse(focusBlock.until) : 0;
+  const focusPausedUntil = focusBlock?.active && focusBlock?.until ? Date.parse(focusBlock.until) : 0;
+  const aiMuteUntil = useSelector((s) => s.aiMute.until);
+  // Task calls honour whichever is later: the server focus block ("mute for an
+  // hour") or the short local mute while the AI sheet is open.
+  const pausedUntil = Math.max(
+    Number.isFinite(focusPausedUntil) ? focusPausedUntil : 0,
+    Number(aiMuteUntil) || 0
+  );
   const appState = useRef(AppState.currentState);
+
+  // When the local AI mute lapses, clear it so the effect below replans and
+  // anything that came due while the user was chatting rings one at a time.
+  useEffect(() => {
+    if (!aiMuteUntil) return undefined;
+    const wait = Math.max(0, aiMuteUntil - Date.now()) + 50;
+    const timer = setTimeout(() => dispatch(expireAiMute()), wait);
+    return () => clearTimeout(timer);
+  }, [aiMuteUntil, dispatch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,14 +158,16 @@ export default function AppBackgroundSync() {
 
   useEffect(() => {
     if (!settingsHydrated || !isWakeAlarmAvailable() || !wakeTarget) return;
-    const until = Number.isFinite(pausedUntil) && pausedUntil > Date.now() ? pausedUntil : 0;
+    // Wake alarm follows the server focus block only — a quick AI chat must
+    // never cancel tomorrow's wake alarm.
+    const until = Number.isFinite(focusPausedUntil) && focusPausedUntil > Date.now() ? focusPausedUntil : 0;
     const nextWake = nextWakeMillis(wakeTarget);
     if (until && nextWake > 0 && nextWake < until) {
       cancelWakeAlarm().catch(() => {});
       return;
     }
     scheduleDailyWakeAlarm(wakeTarget).catch(() => {});
-  }, [settingsHydrated, wakeTarget, pausedUntil]);
+  }, [settingsHydrated, wakeTarget, focusPausedUntil]);
 
   useEffect(() => {
     if (!settingsHydrated) return;

@@ -11,6 +11,14 @@ export const CALL_GAP_MS = 5 * 60 * 1000;
 export const AFTER_CALL_COOLDOWN_MS = 2 * 60 * 1000;
 // Native fallback only: if JS never replans, park queued calls this far out.
 export const QUEUE_RELEASE_MS = 5 * 60 * 1000;
+// While the AI sheet is open, task calls are muted so a ringing alarm can't
+// talk over the mic / the user's typing. The mute is a short lease that the
+// open sheet keeps renewing; if the app dies mid-prompt it lapses by itself.
+export const AI_MUTE_LEASE_MS = 3 * 60 * 1000;
+export const AI_MUTE_RENEW_MS = 60 * 1000;
+// After the sheet closes, hold alarms a little longer so one doesn't fire the
+// instant the user finishes talking.
+export const AI_MUTE_GRACE_MS = 45 * 1000;
 
 export function durationOf(item) {
   const n = Number(item?.durationMin);

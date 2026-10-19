@@ -199,6 +199,28 @@ function parseExtendMin(transcript) {
   return 30;
 }
 
+const ALARM_NOUN = "(?:alarms?|alerts?|calls?|reminders?|notifications?|ringing|buzz(?:ing)?)";
+
+// "mute them all", "stop all alarms until next one hour", "silence the alerts",
+// "dont disturb me", "pause for an hour" — every natural way of asking for quiet.
+// `lower` is already lower-cased with apostrophes stripped.
+function isMuteRequest(lower) {
+  if (
+    /\b(dont disturb|do not disturb|pause (all )?(the |my )?(alarms?|alerts?|calls?|reminders?)|pause for|dnd|im (outside|out|busy)|cutting (my )?hair|haircut|leave me alone)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  const verb = "(?:mute|silence|stop|kill|disable|hush|quiet|turn off|switch off|shut off|snooze)";
+  if (new RegExp(`\\b${verb}\\s+(?:all\\s+|the\\s+|my\\s+|these\\s+|those\\s+|every\\s+|any\\s+)*${ALARM_NOUN}\\b`).test(lower)) {
+    return true;
+  }
+  if (/\b(?:alarms?|alerts?|reminders?)\s+(?:off|muted|silenced)\b/.test(lower)) return true;
+  if (/\b(?:mute|silence|hush)\s+(?:them|it|everything)(?:\s+all)?\b/.test(lower)) return true;
+  return false;
+}
+
 function fallbackAssistant(transcript, { itemIds = [] } = {}) {
   const lower = String(transcript || "").toLowerCase().replace(/['’]/g, "");
   const shift = detectShift(transcript);
@@ -220,17 +242,17 @@ function fallbackAssistant(transcript, { itemIds = [] } = {}) {
       confidence: 0.94,
     };
   }
-  if (/\b(im back|i am back|resume alarms|cancel (dnd|pause|do not disturb)|stop (the )?(pause|dnd)|alarms back on)\b/.test(lower)) {
+  if (
+    /\b(im back|i am back|resume alarms|cancel (dnd|pause|do not disturb)|stop (the )?(pause|dnd)|alarms back on|(turn|switch|put) (the |my )?(alarms?|alerts?|reminders?) (back )?on|unmute)\b/.test(
+      lower
+    )
+  ) {
     return { intent: "resume_focus", confidence: 0.95 };
   }
   if (/\b(another (half )?hour|\d+ more( minutes?)?|extend( the)? (pause|dnd)|give me (another )?\d+)\b/.test(lower)) {
     return { intent: "extend_focus", durationMin: parseExtendMin(transcript), confidence: 0.9 };
   }
-  if (
-    /\b(dont disturb|do not disturb|pause (all )?(alarms|alerts|calls)|pause for|dnd|im (outside|out|busy)|cutting (my )?hair|haircut|leave me alone)\b/.test(
-      lower
-    )
-  ) {
+  if (isMuteRequest(lower)) {
     return {
       intent: "pause_focus",
       durationMin: parseDurationMin(transcript),
@@ -290,8 +312,17 @@ function normalizeParsed(data, fallback) {
   };
 }
 
+// Mute / unmute requests are fully handled by the deterministic parser, and the
+// fallback result always wins over the model for them anyway. Skip the OpenAI
+// round trip (up to 20s) so "mute all alarms" takes effect immediately and
+// still works when OpenAI is slow or down.
+const LOCAL_ONLY_INTENTS = new Set(["pause_focus", "resume_focus", "extend_focus"]);
+
 async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
   const fallback = fallbackAssistant(transcript, { itemIds });
+  if (LOCAL_ONLY_INTENTS.has(fallback.intent)) {
+    return { ...normalizeParsed(null, fallback), ...fallback, intent: fallback.intent };
+  }
   const nowHHMM = hhmmIST();
   const pending = (plan.items || [])
     .filter((item) => item.status === "pending")

@@ -44,12 +44,14 @@ function draftStart(item, now, pausedUntil) {
   const clock = Math.max(scheduled, snooze);
   const armed = armAt(clock, now);
   if (!armed) return null;
+  const at = clampPause(armed.at, now, pausedUntil);
   return {
     item,
     phase: "start",
-    at: clampPause(armed.at, now, pausedUntil),
+    at,
     flexible: !!snooze,
     catchUp: armed.catchUp,
+    clamped: at !== armed.at,
   };
 }
 
@@ -65,12 +67,14 @@ function draftEnd(item, now, pausedUntil) {
   const clock = Math.max(scheduledEnd, startedEnd, followUp);
   const armed = armAt(clock, now);
   if (!armed) return null;
+  const at = clampPause(armed.at, now, pausedUntil);
   return {
     item,
     phase: "end",
-    at: clampPause(armed.at, now, pausedUntil),
+    at,
     flexible: !!followUp,
     catchUp: armed.catchUp,
+    clamped: at !== armed.at,
   };
 }
 
@@ -109,7 +113,9 @@ function spaceCalls(drafts, now) {
   const anchored = [];
   const floating = [];
   for (const draft of drafts) {
-    if (draft.catchUp || isFlexible(draft)) floating.push(draft);
+    // Calls pushed past a mute window all land on the same instant — space
+    // them like catch-up calls so they ring one at a time.
+    if (draft.catchUp || draft.clamped || isFlexible(draft)) floating.push(draft);
     else anchored.push(draft);
   }
 
@@ -117,7 +123,7 @@ function spaceCalls(drafts, now) {
   const occupied = placed.map((row) => row.at);
   floating.sort((a, b) => a.at - b.at);
   for (const draft of floating) {
-    const floor = draft.catchUp ? now + 2_000 : now + AFTER_CALL_COOLDOWN_MS;
+    const floor = draft.catchUp || draft.clamped ? now + 2_000 : now + AFTER_CALL_COOLDOWN_MS;
     const at = nextFreeSlot(Math.max(draft.at, floor), occupied);
     placed.push({ ...draft, at });
     occupied.push(at);

@@ -1,6 +1,8 @@
 import { getApiUrl, setApiUrl } from "./apiConfig";
 
 const RETRY_MS = [2500, 6000, 10000];
+// Render's free tier can take ~30-50s to wake; one attempt gets this long.
+const REQUEST_TIMEOUT_MS = 45000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,12 +61,24 @@ export async function testApiConnection(url) {
 
 export async function api(path, options = {}) {
   const attempts = __DEV__ ? 1 : RETRY_MS.length + 1;
+  const method = String(options.method || "GET").toUpperCase();
   let lastError;
   for (let i = 0; i < attempts; i++) {
+    // Without a timeout a stalled connection leaves the UI on a spinner
+    // forever (e.g. the AI sheet stuck on "On it…").
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let timedOut = false;
+    const timer = controller
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, REQUEST_TIMEOUT_MS)
+      : null;
     try {
       const res = await fetch(`${getApiUrl()}${path}`, {
         headers: { "Content-Type": "application/json", ...(options.headers || {}) },
         ...options,
+        ...(controller ? { signal: controller.signal } : {}),
       });
       const text = await res.text();
       if (!res.ok) {
@@ -83,12 +97,21 @@ export async function api(path, options = {}) {
       }
       return parseBody(text, res.headers.get("content-type"));
     } catch (err) {
-      lastError = err;
-      if (isRetryableError(err) && i < attempts - 1) {
+      let failure = err;
+      if (timedOut) {
+        failure = new Error("The server took too long to answer. It may be waking up — try again in a moment.");
+      }
+      lastError = failure;
+      // A timed-out write may already have been applied on the server, so only
+      // reads are safe to resend (resending a POST could add a task twice).
+      const retryable = timedOut ? method === "GET" : isRetryableError(failure);
+      if (retryable && i < attempts - 1) {
         await sleep(RETRY_MS[i] || 10000);
         continue;
       }
-      throw err;
+      throw failure;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   throw lastError;

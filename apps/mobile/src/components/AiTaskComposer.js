@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useDispatch } from "react-redux";
-import { addVoiceTask } from "../store";
+import { addVoiceTask, beginAiMute, endAiMute } from "../store";
 import { clearTaskCallOverride } from "../taskAlerts";
+import { AI_MUTE_RENEW_MS } from "../taskCallConfig";
 import { formatClock12 } from "../formatTime";
 import { useTheme } from "../hooks/useTheme";
 import {
+  armAlarmSession,
   startTaskCallListening,
   stopTaskCallListening,
   subscribeTaskCallSpeech,
@@ -25,9 +27,14 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
   const [preview, setPreview] = useState(null);
   const adding = useRef(false);
   const submitRef = useRef(null);
+  const closeTimer = useRef(null);
   const selectedCount = selectedIds.length;
 
   const close = useCallback(() => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
     adding.current = false;
     stopTaskCallListening().catch(() => {});
     setOpen(false);
@@ -52,7 +59,8 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
         setPreview(result.preview || result.parsed || result.item);
         setPhase(result.intent || "done");
         if (result.intent === "skip_tasks") onConsumed?.();
-        setTimeout(close, 1400);
+        if (closeTimer.current) clearTimeout(closeTimer.current);
+        closeTimer.current = setTimeout(close, 1400);
       } catch (err) {
         adding.current = false;
         setError(err.message || "I couldn't do that.");
@@ -68,7 +76,13 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
     setHeard("");
     setPhase("listening");
     try {
-      await startTaskCallListening();
+      // A finished task call leaves the native session "dismissed", which makes
+      // the recognizer refuse to start and swallow every event. Re-arm first.
+      await armAlarmSession().catch(() => {});
+      const started = await startTaskCallListening();
+      // false = mic permission missing or recognizer unavailable. Don't leave
+      // the sheet stuck on "Listening…" — fall back to typing.
+      if (started === false) setPhase("type");
     } catch (_e) {
       setPhase("type");
     }
@@ -76,7 +90,14 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
 
   useEffect(() => {
     if (!open) return undefined;
-    listen();
+    let cancelled = false;
+    // Mute task calls first, then open the mic — otherwise a ringing alarm
+    // would be picked up by the recognizer and talk over the user.
+    dispatch(beginAiMute()).then(() => {
+      if (!cancelled) listen();
+    });
+    // Keep the mute lease alive for as long as the sheet stays open.
+    const renew = setInterval(() => dispatch(beginAiMute()), AI_MUTE_RENEW_MS);
     const unsub = subscribeTaskCallSpeech((event) => {
       if (adding.current) return;
       const text = event?.text || "";
@@ -88,10 +109,20 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
       if (event?.type === "result" && text.trim()) submitRef.current?.(text);
     });
     return () => {
+      cancelled = true;
+      clearInterval(renew);
       unsub();
       stopTaskCallListening().catch(() => {});
+      dispatch(endAiMute());
     };
-  }, [listen, open]);
+  }, [dispatch, listen, open]);
+
+  useEffect(
+    () => () => {
+      if (closeTimer.current) clearTimeout(closeTimer.current);
+    },
+    []
+  );
 
   useEffect(() => () => stopTaskCallListening().catch(() => {}), []);
 

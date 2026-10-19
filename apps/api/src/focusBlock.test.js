@@ -48,6 +48,40 @@ describe("fallbackAssistant", () => {
   });
 });
 
+describe("fallbackAssistant mute phrasing", () => {
+  it("treats natural 'stop / mute alarms' requests as a pause, not a new task", () => {
+    const spoken = [
+      "stop all alarms until next one hour, and mute them all",
+      "mute all alarms for an hour",
+      "Silence the alerts for 30 minutes",
+      "turn off alarms for two hours",
+      "please stop the alarms, I'm in a meeting",
+      "mute them all",
+      "alarms off for an hour",
+    ];
+    for (const text of spoken) {
+      assert.equal(fallbackAssistant(text).intent, "pause_focus", text);
+    }
+  });
+
+  it("reads the hour from the request", () => {
+    const parsed = fallbackAssistant("stop all alarms until next one hour, and mute them all");
+    assert.equal(parsed.durationMin, 60);
+    assert.equal(parsed.until, "");
+  });
+
+  it("turning alarms back on resumes instead of pausing", () => {
+    assert.equal(fallbackAssistant("turn alarms back on").intent, "resume_focus");
+    assert.equal(fallbackAssistant("unmute").intent, "resume_focus");
+  });
+
+  it("does not hijack ordinary tasks and reminders", () => {
+    assert.equal(fallbackAssistant("call the plumber to stop the leak around 6 PM").intent, "add_task");
+    assert.equal(fallbackAssistant("snooze this for 10 minutes").intent, "defer_task");
+    assert.equal(fallbackAssistant("study DSA at 9 PM").intent, "add_task");
+  });
+});
+
 describe("applyCatchUp", () => {
   it("holds missed items slot-by-slot and leaves future items alone", () => {
     const workout = item({ key: "workout", title: "Workout", scheduledAt: "17:00" });
