@@ -53,8 +53,22 @@ function UndoBar() {
 
   if (!visible) return null;
   return (
-    <View style={{ position: "absolute", left: 16, right: 16, bottom: 28, backgroundColor: "#1a1e25", borderRadius: 14, paddingVertical: 12, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-      <Text style={{ color: "#f2f4f7", fontSize: 14, fontWeight: "600" }}>Schedule updated</Text>
+    <View
+      style={{
+        position: "absolute",
+        left: 16,
+        right: 16,
+        bottom: 28,
+        backgroundColor: "#1a1e25",
+        borderRadius: 14,
+        paddingVertical: 12,
+        paddingHorizontal: 16,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      <Text style={{ color: "#f2f4f7", fontSize: 14, fontWeight: "600", flex: 1 }}>Schedule updated</Text>
       <Pressable
         onPress={() => {
           dispatch(undoShift(undo.shiftId))
@@ -62,8 +76,17 @@ function UndoBar() {
             .then(() => dispatch(fetchToday()))
             .catch(() => dispatch(clearUndo()));
         }}
+        hitSlop={8}
       >
         <Text style={{ color: "#d4af6a", fontSize: 14, fontWeight: "700" }}>Undo</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="Dismiss"
+        onPress={() => dispatch(clearUndo())}
+        hitSlop={8}
+        style={{ paddingHorizontal: 4 }}
+      >
+        <Text style={{ color: "#9aa3ad", fontSize: 20, fontWeight: "600", lineHeight: 22 }}>×</Text>
       </Pressable>
     </View>
   );
