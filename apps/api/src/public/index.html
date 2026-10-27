@@ -161,13 +161,46 @@
     .ddot.filled { background: var(--fill); border-color: var(--fill); }
 
     footer.note { text-align: center; color: var(--muted-2); font-size: 12px; margin-top: 30px; }
+    .login-screen { max-width: 380px; margin: 12vh auto 0; padding: 0 20px; }
+    .login-card { background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 22px; }
+    .login-card h1 { font-size: 19px; margin: 0 0 6px; }
+    .login-card p { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+    .login-card label { display: block; font-size: 11px; color: var(--muted-2); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 6px; }
+    .login-card input { width: 100%; background: var(--bg-soft); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font: inherit; margin-bottom: 14px; }
+    .login-card button { width: 100%; background: var(--gold); color: #1a1408; border: none; border-radius: 12px; padding: 12px; font: inherit; font-weight: 700; cursor: pointer; }
+    .login-error { color: var(--danger); font-size: 13px; min-height: 18px; margin-top: 10px; }
+    .brand-actions { display: flex; align-items: center; gap: 10px; }
+    .signout { background: transparent; border: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+    .privacy { margin-top: 28px; background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 18px; }
+    .privacy h2 { font-size: 15px; margin: 0 0 6px; }
+    .privacy p { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+    .privacy label { display: block; font-size: 11px; color: var(--muted-2); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin: 12px 0 6px; }
+    .privacy input { width: 100%; background: var(--bg-soft); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font: inherit; }
+    .privacy button { margin-top: 12px; background: var(--gold); color: #1a1408; border: none; border-radius: 12px; padding: 12px 14px; font: inherit; font-weight: 700; cursor: pointer; }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div id="loginScreen" class="login-screen" hidden>
+    <div class="login-card">
+      <h1>Life OS</h1>
+      <p>Sign in to open today.</p>
+      <form id="loginForm">
+        <label for="loginUser">Username</label>
+        <input id="loginUser" name="username" autocomplete="username" autocapitalize="none" />
+        <label for="loginPass">Password</label>
+        <input id="loginPass" name="password" type="password" autocomplete="current-password" />
+        <button type="submit">Sign in</button>
+        <div id="loginError" class="login-error"></div>
+      </form>
+    </div>
+  </div>
+  <div class="wrap" id="appScreen">
     <div class="brand">
       <h1>Life OS</h1>
-      <span class="brand-badge">Raj · Mon–Sat office</span>
+      <div class="brand-actions">
+        <span class="brand-badge">Raj · Mon–Sat office</span>
+        <button id="signOut" class="signout" type="button">Sign out</button>
+      </div>
     </div>
     <div class="sub">Skin · Hair · Workout · Study — that's the whole list right now.</div>
 
@@ -177,6 +210,25 @@
     </div>
 
     <div id="main">Loading…</div>
+    <section class="privacy">
+      <h2>Weekly schedule</h2>
+      <p>Download all seven days, edit the file, then import it. Problems are listed and nothing is saved until the file is valid.</p>
+      <button id="exportSchedule" type="button">Export the week</button>
+      <label for="scheduleFile">Import a schedule file</label>
+      <input id="scheduleFile" type="file" accept="application/json,.json" />
+      <div id="scheduleError" class="login-error" style="white-space: pre-wrap"></div>
+    </section>
+    <section class="privacy">
+      <h2>Your data</h2>
+      <p>Export is one JSON file. Delete removes the account, plans, logs, and sign-in sessions.</p>
+      <button id="exportData" type="button">Export my data</button>
+      <label for="deletePassword">Password</label>
+      <input id="deletePassword" type="password" autocomplete="current-password" />
+      <label for="deletePhrase">Type DELETE MY DATA</label>
+      <input id="deletePhrase" autocomplete="off" />
+      <button id="deleteData" type="button">Delete my data</button>
+      <div id="privacyError" class="login-error"></div>
+    </section>
     <footer class="note">Dance and everything else stays parked until these four are consistent.</footer>
   </div>
 
@@ -194,11 +246,144 @@
     const todayBtn = document.getElementById("todayLink");
     const weekBtn = document.getElementById("weekLink");
 
+    const TOKEN_KEY = "lifeos.token";
+    const loginScreen = document.getElementById("loginScreen");
+    const appScreen = document.getElementById("appScreen");
+
+    function authToken() {
+      return sessionStorage.getItem(TOKEN_KEY) || "";
+    }
+
+    function showLogin(message) {
+      appScreen.hidden = true;
+      loginScreen.hidden = false;
+      document.getElementById("loginError").textContent = message || "";
+    }
+
+    function showApp() {
+      loginScreen.hidden = true;
+      appScreen.hidden = false;
+    }
+
     async function api(path, options) {
-      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
-      if (!res.ok) throw new Error(await res.text());
+      const headers = { "Content-Type": "application/json", ...(options && options.headers) };
+      const token = authToken();
+      if (token) headers.Authorization = "Bearer " + token;
+      const res = await fetch(path, { ...options, headers });
+      if (res.status === 401 && path !== "/api/auth/login") {
+        sessionStorage.removeItem(TOKEN_KEY);
+        showLogin("Sign in required.");
+        throw new Error("Sign in required.");
+      }
+      if (!res.ok) {
+        let message = await res.text();
+        try { message = JSON.parse(message).error || message; } catch (_e) {}
+        throw new Error(message);
+      }
       return res.json();
     }
+
+    document.getElementById("loginForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const error = document.getElementById("loginError");
+      error.textContent = "";
+      try {
+        const data = await api("/api/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("loginUser").value,
+            password: document.getElementById("loginPass").value,
+          }),
+        });
+        sessionStorage.setItem(TOKEN_KEY, data.token);
+        document.getElementById("loginPass").value = "";
+        showApp();
+        renderToday().catch((e) => (main.textContent = e.message));
+      } catch (err) {
+        error.textContent = err.message || "Could not sign in.";
+      }
+    });
+
+    document.getElementById("exportSchedule").addEventListener("click", async () => {
+      const error = document.getElementById("scheduleError");
+      error.textContent = "";
+      try {
+        const data = await api("/api/schedule");
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "life-os-schedule.json";
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } catch (err) {
+        error.textContent = err.message || "Could not export.";
+      }
+    });
+
+    document.getElementById("scheduleFile").addEventListener("change", async (event) => {
+      const error = document.getElementById("scheduleError");
+      error.textContent = "";
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      try {
+        const body = JSON.parse(await file.text());
+        const res = await fetch("/api/schedule/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          error.textContent = (data.errors || [data.error || "Could not save."]).join("\n");
+          return;
+        }
+        error.textContent = "Saved. " + data.days + " days updated.";
+      } catch (err) {
+        error.textContent = err.message || "That file could not be read.";
+      }
+    });
+
+    document.getElementById("exportData").addEventListener("click", async () => {
+      const error = document.getElementById("privacyError");
+      error.textContent = "";
+      try {
+        const data = await api("/api/export");
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "life-os-export.json";
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } catch (err) {
+        error.textContent = err.message || "Could not export.";
+      }
+    });
+
+    document.getElementById("deleteData").addEventListener("click", async () => {
+      const error = document.getElementById("privacyError");
+      error.textContent = "";
+      try {
+        await api("/api/data", {
+          method: "DELETE",
+          body: JSON.stringify({
+            password: document.getElementById("deletePassword").value,
+            phrase: document.getElementById("deletePhrase").value,
+          }),
+        });
+        sessionStorage.removeItem(TOKEN_KEY);
+        document.getElementById("deletePassword").value = "";
+        document.getElementById("deletePhrase").value = "";
+        showLogin("Your data has been deleted.");
+      } catch (err) {
+        error.textContent = err.message || "Could not delete.";
+      }
+    });
+
+    document.getElementById("signOut").addEventListener("click", async () => {
+      try { await api("/api/auth/logout", { method: "POST", body: "{}" }); } catch (_e) {}
+      sessionStorage.removeItem(TOKEN_KEY);
+      showLogin("");
+    });
 
     function setActive(btn) {
       [todayBtn, weekBtn].forEach((b) => b.classList.remove("active"));
@@ -363,7 +548,12 @@
 
     todayBtn.onclick = () => renderToday().catch((e) => (main.textContent = e.message));
     weekBtn.onclick = () => renderWeek().catch((e) => (main.textContent = e.message));
-    renderToday().catch((e) => (main.textContent = e.message));
+    if (authToken()) {
+      showApp();
+      renderToday().catch((e) => (main.textContent = e.message));
+    } else {
+      showLogin("");
+    }
 
     async function checkForNewDay() {
       if (document.hidden || !currentDate) return;

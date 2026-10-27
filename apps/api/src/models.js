@@ -15,6 +15,17 @@ const UserSchema = new mongoose.Schema(
     prepTarget: { type: String, default: "20:00" },
     themeMode: { type: String, enum: ["dark", "light"], default: "dark" },
     voiceAlerts: { type: Boolean, default: true },
+    aiEnabled: { type: Boolean, default: true },
+    // The wake and home clocks the approved week was built around. A later
+    // settings change is the difference from these, so Saturday and Sunday
+    // keep their own times until that change.
+    wakeBaseline: { type: String, default: "" },
+    homeBaseline: { type: String, default: "" },
+    sleepHours: { type: Number, default: 8 },
+    sleepMode: { type: String, default: "auto" },
+    gymBlockMin: { type: Object, default: undefined },
+    dayTypes: { type: Object, default: undefined },
+    deloadEveryWeeks: { type: Number, default: 5 },
     priorities: {
       type: [String],
       default: ["skin", "hair", "fitness", "learning"],
@@ -36,7 +47,7 @@ const TemplateSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     weekday: { type: Number, required: true },
-    dayType: { type: String, enum: ["office", "weekend"], required: true },
+    dayType: { type: String, enum: ["office", "weekend", "wfh", "off"], required: true },
     items: { type: Array, default: [] },
     version: { type: String, default: "raj-v1" },
     approved: { type: Boolean, default: true },
@@ -45,6 +56,15 @@ const TemplateSchema = new mongoose.Schema(
 );
 
 TemplateSchema.index({ userId: 1, weekday: 1 }, { unique: true });
+
+const DepSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ["before", "with", "after", "blocks"], required: true },
+    target: { type: String, required: true },
+    minGapMin: Number,
+  },
+  { _id: false }
+);
 
 const StepSchema = new mongoose.Schema(
   {
@@ -107,6 +127,15 @@ const PlanItemSchema = new mongoose.Schema(
     heldUntil: Date,
     holdReason: { type: String, default: undefined },
     steps: [StepSchema],
+    category: {
+      type: String,
+      enum: ["workout", "meal", "supplement", "skincare", "haircare", "study", "sleep", "work", "wellness"],
+    },
+    plannedAt: String,
+    movable: { type: String, enum: ["fixed", "soft", "free"] },
+    minDurationMin: Number,
+    deps: { type: [DepSchema], default: undefined },
+    blockId: { type: String, enum: ["morning", "afternoon", "night"] },
   },
   { _id: true }
 );
@@ -125,11 +154,36 @@ const DailyPlanSchema = new mongoose.Schema(
     // re-shift by the delta instead of recomputing everything from scratch.
     wakeShiftMin: { type: Number, default: 0 },
     homeShiftMin: { type: Number, default: 0 },
+    revision: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
 
 DailyPlanSchema.index({ userId: 1, date: 1 }, { unique: true });
+DailyPlanSchema.pre("save", function bumpRevision() {
+  if (this.isNew || !this.isModified() || this.isModified("revision")) return;
+  this.revision = (this.revision || 0) + 1;
+});
+
+const ShiftOpSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    date: { type: String, required: true },
+    source: { type: String, enum: ["ai", "manual"], default: "manual" },
+    intent: { type: String, required: true },
+    status: { type: String, enum: ["previewed", "applied", "undone", "expired"], default: "previewed" },
+    planRevision: { type: Number, required: true },
+    tokenHash: { type: String, required: true },
+    before: { type: Array, default: [] },
+    after: { type: Array, default: [] },
+    changes: { type: Array, default: [] },
+    conflicts: { type: Array, default: [] },
+    reason: { type: String, default: "" },
+    appliedAt: Date,
+    undoUntil: Date,
+  },
+  { timestamps: true }
+);
 
 const LifeEventSchema = new mongoose.Schema(
   {
@@ -211,6 +265,129 @@ const CarryForwardTaskSchema = new mongoose.Schema(
 CarryForwardTaskSchema.index({ userId: 1, originKey: 1 }, { unique: true });
 CarryForwardTaskSchema.index({ userId: 1, status: 1 });
 
+const RoutineDraftSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    version: { type: String, required: true },
+    approved: { type: Boolean, default: false },
+    settings: { type: Object, default: {} },
+    days: { type: Array, default: [] },
+  },
+  { timestamps: true }
+);
+
+RoutineDraftSchema.index({ userId: 1, version: 1 }, { unique: true });
+
+const AuthAccountSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    username: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    passwordSalt: { type: String, required: true },
+    passwordHash: { type: String, required: true },
+  },
+  { timestamps: true }
+);
+
+const SessionSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    tokenHash: { type: String, required: true, unique: true },
+    deviceLabel: { type: String, default: "" },
+    lastUsedAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true },
+  },
+  { timestamps: true }
+);
+
+SessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+const MutationReceiptSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    clientId: { type: String, required: true },
+    itemId: String,
+    field: String,
+    clientAt: Number,
+    applied: { type: Boolean, default: true },
+  },
+  { timestamps: true }
+);
+
+MutationReceiptSchema.index({ userId: 1, clientId: 1 }, { unique: true });
+
+const ExerciseSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true, unique: true },
+    weekday: Number,
+    stepKey: String,
+    name: String,
+    equipment: String,
+    stepKg: Number,
+    repLow: Number,
+    repHigh: Number,
+    restSec: Number,
+    why: String,
+    cues: { type: [String], default: [] },
+    mistakes: { type: [String], default: [] },
+    substitutes: { type: [String], default: [] },
+    safetyNote: String,
+  },
+  { timestamps: true }
+);
+
+const WorkoutSetSchema = new mongoose.Schema(
+  {
+    exerciseKey: String,
+    setIndex: Number,
+    reps: Number,
+    weightKg: Number,
+    rpe: Number,
+    isWarmup: { type: Boolean, default: false },
+    painFlag: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+const WorkoutSessionSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    date: { type: String, required: true },
+    planItemId: String,
+    clientId: { type: String, required: true },
+    checkin: {
+      painFlag: Boolean,
+      soreness0to4: Number,
+      sleepOk: Boolean,
+    },
+    sets: { type: [WorkoutSetSchema], default: [] },
+    notes: { type: String, default: "" },
+  },
+  { timestamps: true }
+);
+
+WorkoutSessionSchema.index({ userId: 1, clientId: 1 }, { unique: true });
+WorkoutSessionSchema.index({ userId: 1, date: 1 });
+
+const SuggestionSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    type: {
+      type: String,
+      enum: ["progress", "hold", "reduce", "deload", "extra_rest", "start"],
+      required: true,
+    },
+    exerciseKey: String,
+    reason: { type: String, default: "" },
+    reasonCodes: { type: [String], default: [] },
+    weightKg: Number,
+    status: { type: String, enum: ["shown", "accepted", "dismissed"], default: "shown" },
+    sessionId: { type: mongoose.Schema.Types.ObjectId, ref: "WorkoutSession" },
+  },
+  { timestamps: true }
+);
+
+SuggestionSchema.index({ userId: 1, status: 1 });
+
 module.exports = {
   User: mongoose.models.User || mongoose.model("User", UserSchema),
   RoutineTemplate:
@@ -228,4 +405,17 @@ module.exports = {
   CarryForwardTask:
     mongoose.models.CarryForwardTask ||
     mongoose.model("CarryForwardTask", CarryForwardTaskSchema),
+  AuthAccount:
+    mongoose.models.AuthAccount || mongoose.model("AuthAccount", AuthAccountSchema),
+  Session: mongoose.models.Session || mongoose.model("Session", SessionSchema),
+  RoutineDraft:
+    mongoose.models.RoutineDraft || mongoose.model("RoutineDraft", RoutineDraftSchema),
+  ShiftOp: mongoose.models.ShiftOp || mongoose.model("ShiftOp", ShiftOpSchema),
+  Exercise: mongoose.models.Exercise || mongoose.model("Exercise", ExerciseSchema),
+  WorkoutSession:
+    mongoose.models.WorkoutSession || mongoose.model("WorkoutSession", WorkoutSessionSchema),
+  Suggestion: mongoose.models.Suggestion || mongoose.model("Suggestion", SuggestionSchema),
+  MutationReceipt:
+    mongoose.models.MutationReceipt ||
+    mongoose.model("MutationReceipt", MutationReceiptSchema),
 };

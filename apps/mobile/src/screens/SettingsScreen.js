@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import { useDispatch, useSelector } from "react-redux";
 import { fetchSettings, fetchToday, updateSettings } from "../store";
+import { deleteMyData, logout } from "../authSlice";
 import { useTheme } from "../hooks/useTheme";
 import TimeStepper from "../components/TimeStepper";
 import {
@@ -15,12 +16,12 @@ import {
 import { isVoiceAgentAvailable, speakNow, previewCue } from "../voiceAgent";
 import { isTaskAlertsAvailable, testTaskAlert } from "../taskAlerts";
 import { getApiUrl, saveApiUrl } from "../apiConfig";
-import { testApiConnection } from "../api";
+import { api, testApiConnection } from "../api";
 import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 
 export default function SettingsScreen({ navigation }) {
   const dispatch = useDispatch();
-  const { wakeTarget, homeTarget, prepTarget, themeMode, voiceAlerts, name, loading, saving, error } = useSelector(
+  const { wakeTarget, homeTarget, prepTarget, themeMode, voiceAlerts, aiEnabled, name, loading, saving, error } = useSelector(
     (s) => s.settings
   );
   const nativeChecked = useRef(false);
@@ -36,6 +37,11 @@ export default function SettingsScreen({ navigation }) {
   const [serverSaved, setServerSaved] = useState(false);
   const [serverSaving, setServerSaving] = useState(false);
   const [serverError, setServerError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deletePhrase, setDeletePhrase] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -149,6 +155,25 @@ export default function SettingsScreen({ navigation }) {
             onPress={() => dispatch(updateSettings({ voiceAlerts: false }))}
           >
             <Text style={[styles.modeBtnText, !voiceAlerts && styles.modeBtnTextActive]}>Off</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.addTimeLabel}>Cloud AI</Text>
+        <Text style={styles.hint}>
+          On, unclear requests can go to the model. Off, only clear local commands work: mute, shift, skip, add a task.
+          Pain, injury, and supplement questions are declined either way.
+        </Text>
+        <View style={styles.modeToggle}>
+          <Pressable
+            style={[styles.modeBtn, aiEnabled !== false && styles.modeBtnActive]}
+            onPress={() => dispatch(updateSettings({ aiEnabled: true }))}
+          >
+            <Text style={[styles.modeBtnText, aiEnabled !== false && styles.modeBtnTextActive]}>On</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.modeBtn, aiEnabled === false && styles.modeBtnActive]}
+            onPress={() => dispatch(updateSettings({ aiEnabled: false }))}
+          >
+            <Text style={[styles.modeBtnText, aiEnabled === false && styles.modeBtnTextActive]}>Off</Text>
           </Pressable>
         </View>
       </Pressable>
@@ -287,6 +312,82 @@ export default function SettingsScreen({ navigation }) {
         {serverSaved ? <Text style={styles.saved}>Connected — using {getApiUrl()}.</Text> : null}
         {serverError ? <Text style={styles.error}>{serverError}</Text> : null}
       </View>
+
+      <Text style={styles.sectionLabel}>Weekly schedule</Text>
+      <Pressable style={styles.card} onPress={() => navigation.navigate("ScheduleFile")}>
+        <Text style={styles.hint}>
+          Download all seven days, change times and tasks in the file, then import it. The database updates from that file.
+        </Text>
+        <Text style={styles.link}>Edit the week from a file →</Text>
+      </Pressable>
+
+      <Text style={styles.sectionLabel}>Your data</Text>
+      <View style={styles.card}>
+        <Text style={styles.hint}>
+          Download a copy of everything stored for this account. Password hashes and sign-in tokens are left out.
+        </Text>
+        <Pressable
+          style={[styles.saveBtn, exporting && styles.saveBtnDisabled]}
+          disabled={exporting}
+          onPress={async () => {
+            setExporting(true);
+            setDeleteError("");
+            try {
+              const data = await api("/api/export");
+              await Share.share({ message: JSON.stringify(data) });
+            } catch (err) {
+              if (err?.message && err.message !== "User did not share") setDeleteError(err.message);
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          <Text style={styles.saveBtnText}>{exporting ? "Preparing…" : "Export my data"}</Text>
+        </Pressable>
+        <Text style={styles.addTimeLabel}>Delete everything</Text>
+        <Text style={styles.hint}>
+          This removes the account, plans, logs, and sign-in sessions. Type your password and DELETE MY DATA.
+        </Text>
+        <TextInput
+          style={styles.input}
+          value={deletePassword}
+          secureTextEntry
+          autoCapitalize="none"
+          placeholder="Password"
+          placeholderTextColor={colors.muted2}
+          onChangeText={setDeletePassword}
+        />
+        <TextInput
+          style={styles.input}
+          value={deletePhrase}
+          autoCapitalize="characters"
+          autoCorrect={false}
+          placeholder="DELETE MY DATA"
+          placeholderTextColor={colors.muted2}
+          onChangeText={setDeletePhrase}
+        />
+        <Pressable
+          style={[styles.saveBtn, deleting && styles.saveBtnDisabled]}
+          disabled={deleting}
+          onPress={async () => {
+            setDeleting(true);
+            setDeleteError("");
+            try {
+              await dispatch(deleteMyData({ password: deletePassword, phrase: deletePhrase })).unwrap();
+            } catch (err) {
+              setDeleteError(err.message || "Could not delete the data.");
+              setDeleting(false);
+            }
+          }}
+        >
+          <Text style={styles.saveBtnText}>{deleting ? "Deleting…" : "Delete my data"}</Text>
+        </Pressable>
+        {deleteError ? <Text style={styles.error}>{deleteError}</Text> : null}
+      </View>
+
+      <Pressable style={styles.card} onPress={() => dispatch(logout())}>
+        <Text style={styles.link}>Sign out</Text>
+      </Pressable>
     </ScrollView>
   );
 }

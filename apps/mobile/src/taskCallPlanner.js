@@ -39,7 +39,7 @@ function armAt(clockMs, now) {
 
 function draftStart(item, now, pausedUntil) {
   if (item.startedAt) return null;
-  const scheduled = startMillis(item.scheduledAt);
+  const scheduled = startMillis(item.scheduledAt, new Date(now), item.planDate);
   const snooze = parseMillis(item.snoozeUntil);
   const clock = Math.max(scheduled, snooze);
   const armed = armAt(clock, now);
@@ -58,7 +58,7 @@ function draftStart(item, now, pausedUntil) {
 function draftEnd(item, now, pausedUntil) {
   const durationMs = durationOf(item) * 60 * 1000;
   if (durationMs <= 0) return null;
-  const scheduledStart = startMillis(item.scheduledAt);
+  const scheduledStart = startMillis(item.scheduledAt, new Date(now), item.planDate);
   const scheduledEnd = scheduledStart > 0 ? scheduledStart + durationMs : 0;
   // "I'm ready" owns the remaining duration. If they never started, the
   // scheduled slot still gets a "did you finish?" ring (9:00 + 30m → 9:30).

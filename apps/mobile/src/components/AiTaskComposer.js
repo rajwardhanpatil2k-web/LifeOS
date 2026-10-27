@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useDispatch } from "react-redux";
-import { addVoiceTask, beginAiMute, endAiMute } from "../store";
+import { addVoiceTask, beginAiMute, endAiMute, fetchToday } from "../store";
+import { isNetworkError } from "../api";
+import { confirmShift, offerUndo } from "../shiftSlice";
 import { clearTaskCallOverride } from "../taskAlerts";
 import { AI_MUTE_RENEW_MS } from "../taskCallConfig";
 import { formatClock12 } from "../formatTime";
@@ -25,10 +27,23 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
   const [heard, setHeard] = useState("");
   const [error, setError] = useState("");
   const [preview, setPreview] = useState(null);
+  const [pendingShift, setPendingShift] = useState(null);
   const adding = useRef(false);
   const submitRef = useRef(null);
   const closeTimer = useRef(null);
+  const micOn = useRef(false);
+  const spoken = useRef("");
   const selectedCount = selectedIds.length;
+
+  const remember = useCallback((text) => {
+    const next = String(text || "").trim();
+    if (!next) return spoken.current;
+    const prev = spoken.current.trim();
+    const combined = !prev || next.startsWith(prev) ? next : `${prev} ${next}`;
+    spoken.current = combined;
+    setHeard(combined);
+    return combined;
+  }, []);
 
   const close = useCallback(() => {
     if (closeTimer.current) {
@@ -36,12 +51,15 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
       closeTimer.current = null;
     }
     adding.current = false;
+    micOn.current = false;
+    spoken.current = "";
     stopTaskCallListening().catch(() => {});
     setOpen(false);
     setPhase("idle");
     setHeard("");
     setError("");
     setPreview(null);
+    setPendingShift(null);
   }, []);
 
   const submit = useCallback(
@@ -53,17 +71,29 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
       setError("");
       try {
         const result = await dispatch(addVoiceTask({ transcript: text, itemIds: selectedIds })).unwrap();
+        setPreview(result.preview || result.parsed || result.item);
+        if (result.intent === "ai_declined") {
+          setError(result.error || "I can't advise on that.");
+          setPhase("ai_declined");
+          adding.current = false;
+          return;
+        }
+        if (result.needsConfirm && result.shift?.token) {
+          setPendingShift(result.shift);
+          setPhase("confirm");
+          adding.current = false;
+          return;
+        }
         if (result.intent === "shift_tasks" && Array.isArray(result.shifted)) {
           await Promise.all(result.shifted.map((row) => clearTaskCallOverride(row.id).catch(() => {})));
         }
-        setPreview(result.preview || result.parsed || result.item);
         setPhase(result.intent || "done");
         if (result.intent === "skip_tasks") onConsumed?.();
         if (closeTimer.current) clearTimeout(closeTimer.current);
         closeTimer.current = setTimeout(close, 1400);
       } catch (err) {
         adding.current = false;
-        setError(err.message || "I couldn't do that.");
+        setError(isNetworkError(err) ? "Cloud AI needs a network connection." : err.message || "I couldn't do that.");
         setPhase("error");
       }
     },
@@ -73,49 +103,64 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
 
   const listen = useCallback(async () => {
     setError("");
-    setHeard("");
     setPhase("listening");
+    micOn.current = true;
     try {
       // A finished task call leaves the native session "dismissed", which makes
       // the recognizer refuse to start and swallow every event. Re-arm first.
       await armAlarmSession().catch(() => {});
       const started = await startTaskCallListening();
+      if (!micOn.current) return;
       // false = mic permission missing or recognizer unavailable. Don't leave
       // the sheet stuck on "Listening…" — fall back to typing.
-      if (started === false) setPhase("type");
+      if (started === false) {
+        micOn.current = false;
+        setPhase("type");
+      }
     } catch (_e) {
+      micOn.current = false;
       setPhase("type");
     }
   }, []);
 
+  const micOff = useCallback(async () => {
+    micOn.current = false;
+    await stopTaskCallListening().catch(() => {});
+    const text = spoken.current.trim() || heard.trim();
+    if (text.length < 3) {
+      setPhase("ready");
+      setError("I didn't catch enough. Turn the mic on and say the whole thing.");
+      return;
+    }
+    submitRef.current?.(text);
+  }, [heard]);
+
   useEffect(() => {
     if (!open) return undefined;
-    let cancelled = false;
-    // Mute task calls first, then open the mic — otherwise a ringing alarm
-    // would be picked up by the recognizer and talk over the user.
-    dispatch(beginAiMute()).then(() => {
-      if (!cancelled) listen();
-    });
-    // Keep the mute lease alive for as long as the sheet stays open.
+    // Task reminders stay quiet the whole time this sheet is open. The mic
+    // stays off until the user turns it on, so a pause is not sent early.
+    dispatch(beginAiMute());
+    setPhase("ready");
     const renew = setInterval(() => dispatch(beginAiMute()), AI_MUTE_RENEW_MS);
     const unsub = subscribeTaskCallSpeech((event) => {
-      if (adding.current) return;
+      if (adding.current || !micOn.current) return;
       const text = event?.text || "";
-      if (event?.type === "partial" || event?.type === "result") setHeard(text);
-      if (event?.type === "error") {
-        setPhase("type");
-        return;
+      if (event?.type === "partial" || event?.type === "result") remember(text);
+      if (event?.type === "error") return;
+      // The recognizer stops on its own after a pause. Keep it open so the
+      // rest of the sentence is kept until Mic off.
+      if (event?.type === "result" && micOn.current) {
+        startTaskCallListening().catch(() => {});
       }
-      if (event?.type === "result" && text.trim()) submitRef.current?.(text);
     });
     return () => {
-      cancelled = true;
       clearInterval(renew);
       unsub();
+      micOn.current = false;
       stopTaskCallListening().catch(() => {});
       dispatch(endAiMute());
     };
-  }, [dispatch, listen, open]);
+  }, [dispatch, open, remember]);
 
   useEffect(
     () => () => {
@@ -146,7 +191,9 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
             <Text style={styles.sheetKicker}>AI</Text>
             <Text style={styles.sheetTitle}>
               {phase === "listening"
-                ? "Listening…"
+                ? "Mic is on"
+                : phase === "ready"
+                  ? "Mic is off"
                 : phase === "saving"
                   ? "On it…"
                   : phase === "pause_focus" || phase === "extend_focus"
@@ -155,6 +202,10 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
                       ? "Alarms back on"
                       : phase === "defer_task"
                         ? "I'll alert you"
+                        : phase === "confirm"
+                        ? "Check this first"
+                        : phase === "ai_declined"
+                          ? "I can't advise on that"
                         : phase === "skip_tasks"
                           ? "Skipped"
                           : phase === "shift_tasks"
@@ -166,7 +217,7 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
             <Text style={styles.sheetHint}>
               {selectedCount
                 ? `Say why you're skipping the ${selectedCount} selected task${selectedCount === 1 ? "" : "s"} — festival, meeting, visiting work.`
-                : "Add a task, pause alarms, skip the rest of today, or say “alert me after 30 minutes.”"}
+                : "Turn the mic on, say the whole request, then turn it off. Task reminders stay quiet while this is open."}
             </Text>
             {heard ? <Text style={styles.heard}>“{heard}”</Text> : null}
             {preview ? (
@@ -181,14 +232,16 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
             {error ? <Text style={styles.error}>{error}</Text> : null}
             {phase === "saving" ? <ActivityIndicator color={AI_COLOR} style={{ marginTop: 12 }} /> : null}
 
-            {phase === "type" || phase === "error" ? (
+            {phase === "ready" || phase === "listening" || phase === "type" || phase === "error" ? (
               <TextInput
                 style={styles.input}
-                placeholder="Skip these, I'm at Ganesh Chaturthi"
+                placeholder="Remind me to take the cream at 9:56"
                 placeholderTextColor={colors.muted2}
                 value={heard}
-                onChangeText={setHeard}
-                autoFocus
+                onChangeText={(value) => {
+                  spoken.current = value;
+                  setHeard(value);
+                }}
               />
             ) : null}
 
@@ -196,14 +249,47 @@ export default function AiTaskComposer({ selectedIds = [], onConsumed }) {
               <Pressable style={styles.ghost} onPress={close}>
                 <Text style={styles.ghostText}>Close</Text>
               </Pressable>
-              {phase === "listening" ? (
-                <Pressable style={styles.secondary} onPress={() => setPhase("type")}>
-                  <Text style={styles.secondaryText}>Type instead</Text>
+              {phase === "ready" || phase === "type" || phase === "error" ? (
+                <Pressable style={styles.primary} onPress={listen}>
+                  <Text style={styles.primaryText}>Mic on</Text>
                 </Pressable>
               ) : null}
-              {phase === "type" || phase === "error" ? (
-                <Pressable style={styles.primary} onPress={() => submit(heard)}>
-                  <Text style={styles.primaryText}>Send</Text>
+              {phase === "listening" ? (
+                <Pressable style={styles.primary} onPress={micOff}>
+                  <Text style={styles.primaryText}>Mic off</Text>
+                </Pressable>
+              ) : null}
+              {phase === "ready" || phase === "type" || phase === "error" ? (
+                <Pressable style={styles.secondary} onPress={() => submit(spoken.current || heard)}>
+                  <Text style={styles.secondaryText}>Send</Text>
+                </Pressable>
+              ) : null}
+              {phase === "confirm" ? (
+                <Pressable
+                  style={styles.primary}
+                  onPress={async () => {
+                    if (!pendingShift?.token || adding.current) return;
+                    adding.current = true;
+                    setPhase("saving");
+                    try {
+                      const applied = await dispatch(confirmShift(pendingShift.token)).unwrap();
+                      const ids = (applied && pendingShift.changes) || [];
+                      await Promise.all(ids.map((row) => clearTaskCallOverride(row.id).catch(() => {})));
+                      dispatch(offerUndo({
+                        shiftId: applied.shiftId,
+                        until: new Date(applied.undoUntil).getTime(),
+                      }));
+                      await dispatch(fetchToday());
+                      if (preview?.title?.startsWith("Skip")) onConsumed?.();
+                      close();
+                    } catch (err) {
+                      adding.current = false;
+                      setError(err.message || "Could not apply that.");
+                      setPhase("confirm");
+                    }
+                  }}
+                >
+                  <Text style={styles.primaryText}>Confirm</Text>
                 </Pressable>
               ) : null}
             </View>

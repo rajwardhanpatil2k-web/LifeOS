@@ -1,4 +1,6 @@
-const IST = "Asia/Kolkata";
+const { formatDate, formatHHMM, DEFAULT_TZ } = require("./time");
+
+const IST = DEFAULT_TZ;
 const CATCH_UP_GAP_MS = 5 * 60 * 1000;
 const CALL_GAP_MS = 2 * 60 * 1000;
 const MEAL_STALE_MS = 3 * 60 * 60 * 1000;
@@ -12,21 +14,11 @@ function padTime(h, m) {
 }
 
 function todayIST(date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: IST,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  return formatDate(date, IST);
 }
 
 function hhmmIST(date = new Date()) {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: IST,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return formatHHMM(date, IST);
 }
 
 function formatClock12(date) {

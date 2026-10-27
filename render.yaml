@@ -1,7 +1,11 @@
 # Render Blueprint — API + web dashboard
 # Dashboard: New + → Blueprint → this repo
 # After first deploy, set MONGODB_URI (Atlas) and OPENAI_API_KEY in the service env.
-# Atlas Network Access must allow 0.0.0.0/0 (Render IPs change).
+# Atlas Network Access must allow 0.0.0.0/0 (Render IPs change). That is acceptable only
+# because the API requires a login. Do not run the database without auth.
+# Encryption at rest is not set here and is not claimed. Confirm it in the Atlas console
+# (the cluster's encryption-at-rest status) before treating production data as encrypted.
+# Set LIFEOS_WEB_ORIGIN to the dashboard origin so browsers on other sites cannot call the API.
 
 services:
   - type: web

@@ -10,6 +10,8 @@ import DayDetailScreen from "../screens/DayDetailScreen";
 import InsightsScreen from "../screens/InsightsScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 import PermissionsScreen from "../screens/PermissionsScreen";
+import ScheduleScreen from "../screens/ScheduleScreen";
+import WorkoutScreen from "../screens/WorkoutScreen";
 
 const Tab = createBottomTabNavigator();
 const TodayStack = createNativeStackNavigator();
@@ -52,6 +54,7 @@ const TodayStackScreen = memo(function TodayStackScreen() {
     <TodayStack.Navigator screenOptions={screenOptions}>
       <TodayStack.Screen name="TodayHome" component={TodayScreen} options={{ title: "Today" }} />
       <TodayStack.Screen name="EditSchedule" component={EditScheduleScreen} options={{ title: "Edit schedule" }} />
+      <TodayStack.Screen name="Workout" component={WorkoutScreen} options={{ title: "Log workout" }} />
     </TodayStack.Navigator>
   );
 });
@@ -72,6 +75,7 @@ const SettingsStackScreen = memo(function SettingsStackScreen() {
     <SettingsStack.Navigator screenOptions={screenOptions}>
       <SettingsStack.Screen name="SettingsHome" component={SettingsScreen} options={{ title: "Settings" }} />
       <SettingsStack.Screen name="Permissions" component={PermissionsScreen} options={{ title: "Permissions" }} />
+      <SettingsStack.Screen name="ScheduleFile" component={ScheduleScreen} options={{ title: "Weekly schedule" }} />
     </SettingsStack.Navigator>
   );
 });

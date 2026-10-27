@@ -1,5 +1,6 @@
 import { NativeModules, Platform } from "react-native";
 import PRODUCTION_API_URL from "./productionApiUrl";
+import { serverUrlProblem } from "./serverUrl";
 
 const { WakeAlarmModule } = NativeModules;
 const PREF_KEY = "apiUrl";
@@ -21,13 +22,19 @@ function bakedUrl() {
 
 let current = bakedUrl();
 
+function releaseBuild() {
+  return typeof __DEV__ !== "undefined" && __DEV__ === false;
+}
+
 export function getApiUrl() {
   return current;
 }
 
 export function setApiUrl(url) {
   const next = trimUrl(url);
-  if (next) current = next;
+  if (!next) return current;
+  if (serverUrlProblem(next, { release: releaseBuild() })) return current;
+  current = next;
   return current;
 }
 
@@ -44,6 +51,8 @@ export async function loadApiUrl() {
 }
 
 export async function saveApiUrl(url) {
+  const problem = serverUrlProblem(url, { release: releaseBuild() });
+  if (problem) throw new Error(problem);
   const next = setApiUrl(url);
   try {
     if (WakeAlarmModule?.setPref) {

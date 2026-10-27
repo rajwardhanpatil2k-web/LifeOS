@@ -1,4 +1,5 @@
 import { getApiUrl, setApiUrl } from "./apiConfig";
+import { serverUrlProblem } from "./serverUrl";
 
 const RETRY_MS = [2500, 6000, 10000];
 // Render's free tier can take ~30-50s to wake; one attempt gets this long.
@@ -12,9 +13,13 @@ function isRetryableStatus(status) {
   return status === 502 || status === 503 || status === 504;
 }
 
-function isRetryableError(err) {
+export function isNetworkError(err) {
   const msg = String(err && err.message ? err.message : err);
   return /network request failed|timeout|timed out|failed to fetch|ECONN|ENOTFOUND|502|503|504/i.test(msg);
+}
+
+function isRetryableError(err) {
+  return isNetworkError(err);
 }
 
 function parseBody(text, contentType) {
@@ -39,6 +44,17 @@ function parseBody(text, contentType) {
   }
 }
 
+let authToken = "";
+let onUnauthorized = () => {};
+
+export function setAuthToken(token) {
+  authToken = token ? String(token) : "";
+}
+
+export function setUnauthorizedHandler(handler) {
+  onUnauthorized = typeof handler === "function" ? handler : () => {};
+}
+
 export function apiUrl() {
   return getApiUrl();
 }
@@ -47,7 +63,8 @@ export const API_URL = getApiUrl();
 
 export async function testApiConnection(url) {
   const base = String(url || getApiUrl()).trim().replace(/\/$/, "");
-  if (!base) throw new Error("Enter a server URL first.");
+  const problem = serverUrlProblem(base, { release: typeof __DEV__ !== "undefined" && __DEV__ === false });
+  if (problem) throw new Error(problem);
   const res = await fetch(`${base}/health`);
   const text = await res.text();
   const data = parseBody(text, res.headers.get("content-type"));
@@ -75,25 +92,35 @@ export async function api(path, options = {}) {
         }, REQUEST_TIMEOUT_MS)
       : null;
     try {
+      const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+      if (authToken && path !== "/api/auth/login") headers.Authorization = `Bearer ${authToken}`;
       const res = await fetch(`${getApiUrl()}${path}`, {
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
         ...options,
+        headers,
         ...(controller ? { signal: controller.signal } : {}),
       });
       const text = await res.text();
+      if (res.status === 401 && path !== "/api/auth/login") {
+        setAuthToken("");
+        onUnauthorized();
+        throw new Error("Sign in required.");
+      }
       if (!res.ok) {
         if (isRetryableStatus(res.status) && i < attempts - 1) {
           await sleep(RETRY_MS[i] || 10000);
           continue;
         }
         let message = text;
+        let errJson = null;
         try {
-          const errJson = parseBody(text, res.headers.get("content-type"));
+          errJson = parseBody(text, res.headers.get("content-type"));
           message = errJson?.error || text;
         } catch (parseErr) {
           message = parseErr.message || text;
         }
-        throw new Error(message || `Request failed ${res.status}`);
+        const failure = new Error(message || `Request failed ${res.status}`);
+        failure.details = errJson;
+        throw failure;
       }
       return parseBody(text, res.headers.get("content-type"));
     } catch (err) {
@@ -103,8 +130,8 @@ export async function api(path, options = {}) {
       }
       lastError = failure;
       // A timed-out write may already have been applied on the server, so only
-      // reads are safe to resend (resending a POST could add a task twice).
-      const retryable = timedOut ? method === "GET" : isRetryableError(failure);
+      // reads are safe to resend. Delete-all is never retried.
+      const retryable = method === "DELETE" ? false : timedOut ? method === "GET" : isRetryableError(failure);
       if (retryable && i < attempts - 1) {
         await sleep(RETRY_MS[i] || 10000);
         continue;

@@ -7,9 +7,11 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "seed": "node src/seed/run.js",
+    "draft:approve": "node src/seed/approveDraft.js",
     "demo:backfill": "node src/seed/backfillDemo.js",
     "demo:clear": "node src/seed/backfillDemo.js --clear",
-    "test": "node --test src/*.test.js"
+    "test": "node --test src/*.test.js",
+    "auth:set": "node src/auth/setPassword.js"
   },
   "engines": {
     "node": ">=20"

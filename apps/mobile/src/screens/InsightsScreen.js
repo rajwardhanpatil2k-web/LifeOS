@@ -6,6 +6,20 @@ import { useTheme } from "../hooks/useTheme";
 import { useStaleFocusRefresh } from "../hooks/useStaleFocusRefresh";
 
 const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const CATEGORY_LABEL = {
+  workout: "Workout",
+  meal: "Meals",
+  supplement: "Supplements",
+  skincare: "Skincare",
+  haircare: "Hair",
+};
+const CATEGORY_DOMAIN = {
+  workout: "fitness",
+  meal: "health",
+  supplement: "health",
+  skincare: "skin",
+  haircare: "hair",
+};
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -196,7 +210,7 @@ export default function InsightsScreen() {
             )}
           </View>
 
-          {stats.momentum.delta !== null || stats.punctuality.avgLateMin !== null ? (
+          {stats.momentum.delta !== null || stats.punctuality.avgLateMin !== null || stats.v2?.timing?.spreadMin != null || stats.v2?.timing?.plannedVsShifted?.count ? (
             <>
               <Text style={styles.sectionLabel}>Trend & timing</Text>
               <View style={styles.card}>
@@ -220,6 +234,20 @@ export default function InsightsScreen() {
                     </Text>
                   </View>
                 ) : null}
+                {stats.v2?.timing?.spreadMin != null ? (
+                  <View style={styles.row}>
+                    <Text style={styles.rowLabel}>Timing spread</Text>
+                    <Text style={styles.rowValue}>{stats.v2.timing.spreadMin} min</Text>
+                  </View>
+                ) : null}
+                {stats.v2?.timing?.plannedVsShifted?.count ? (
+                  <View style={styles.row}>
+                    <Text style={styles.rowLabel}>Moved from the original time</Text>
+                    <Text style={styles.rowValue}>
+                      {stats.v2.timing.plannedVsShifted.count} tasks · {stats.v2.timing.plannedVsShifted.avgMin} min
+                    </Text>
+                  </View>
+                ) : null}
                 {stats.punctuality.avgLateMin !== null ? (
                   <>
                     <View style={styles.row}>
@@ -236,6 +264,35 @@ export default function InsightsScreen() {
                     </View>
                   </>
                 ) : null}
+              </View>
+            </>
+          ) : null}
+
+          {stats.v2?.byCategory?.length ? (
+            <>
+              <Text style={styles.sectionLabel}>By category</Text>
+              <View style={styles.card}>
+                {stats.v2.byCategory.map((entry) => {
+                  const meta = domainMeta(CATEGORY_DOMAIN[entry.category] || "health");
+                  return (
+                    <View key={entry.category} style={styles.barRow}>
+                      <View style={styles.barHead}>
+                        <Text style={styles.barLabel}>{CATEGORY_LABEL[entry.category] || entry.category}</Text>
+                        <Text style={styles.barValue}>
+                          {pctText(entry.adherence)}
+                          <Text style={styles.barCount}>
+                            {"  "}
+                            {entry.done}/{entry.total}
+                            {entry.streak ? ` · ${entry.streak}d` : ""}
+                          </Text>
+                        </Text>
+                      </View>
+                      <View style={styles.track}>
+                        <View style={[styles.fill, { width: `${entry.adherence || 0}%`, backgroundColor: meta.color }]} />
+                      </View>
+                    </View>
+                  );
+                })}
               </View>
             </>
           ) : null}
@@ -268,6 +325,89 @@ export default function InsightsScreen() {
               );
             })}
           </View>
+
+          {stats.v2?.shifts?.count ? (
+            <>
+              <Text style={styles.sectionLabel}>Shifts</Text>
+              <View style={styles.card}>
+                <View style={styles.row}>
+                  <Text style={styles.rowLabel}>Applied</Text>
+                  <Text style={styles.rowValue}>{stats.v2.shifts.count} · {stats.v2.shifts.minutes} min</Text>
+                </View>
+                {stats.v2.shifts.mostShifted.map((entry) => (
+                  <View key={entry.title} style={styles.row}>
+                    <Text style={styles.rowLabel}>{entry.title}</Text>
+                    <Text style={styles.rowValue}>×{entry.count}</Text>
+                  </View>
+                ))}
+                {stats.v2.shifts.reasons.map((entry) => (
+                  <View key={entry.reason} style={styles.row}>
+                    <Text style={styles.rowLabel}>{entry.reason}</Text>
+                    <Text style={styles.rowValue}>×{entry.count}</Text>
+                  </View>
+                ))}
+              </View>
+            </>
+          ) : null}
+
+          {stats.v2?.workout?.sessions ? (
+            <>
+              <Text style={styles.sectionLabel}>Workout log</Text>
+              <View style={styles.card}>
+                <View style={styles.row}>
+                  <Text style={styles.rowLabel}>Sessions</Text>
+                  <Text style={styles.rowValue}>
+                    {stats.v2.workout.sessions} · {stats.v2.workout.sessionsPerWeek}/week
+                  </Text>
+                </View>
+                {stats.v2.workout.rpeTrend ? (
+                  <View style={styles.row}>
+                    <Text style={styles.rowLabel}>Effort</Text>
+                    <Text style={styles.rowValue}>
+                      {stats.v2.workout.rpeTrend.first} → {stats.v2.workout.rpeTrend.second}
+                    </Text>
+                  </View>
+                ) : null}
+                {stats.v2.workout.exercises.map((entry) => (
+                  <View key={entry.key} style={styles.row}>
+                    <Text style={styles.rowLabel}>{entry.name}</Text>
+                    <Text style={styles.rowValue}>
+                      {entry.volume ? `${entry.volume} kg` : "bodyweight"}
+                      {entry.best ? ` · ${entry.best.weightKg}×${entry.best.reps}` : ""}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </>
+          ) : null}
+
+          {stats.v2?.recovery?.checkins || stats.v2?.recovery?.suggestions?.accepted || stats.v2?.recovery?.suggestions?.dismissed ? (
+            <>
+              <Text style={styles.sectionLabel}>Recovery</Text>
+              <View style={styles.card}>
+                <View style={styles.row}>
+                  <Text style={styles.rowLabel}>Check-ins</Text>
+                  <Text style={styles.rowValue}>{stats.v2.recovery.checkins}</Text>
+                </View>
+                {stats.v2.recovery.avgSoreness != null ? (
+                  <View style={styles.row}>
+                    <Text style={styles.rowLabel}>Average soreness</Text>
+                    <Text style={styles.rowValue}>{stats.v2.recovery.avgSoreness} / 4</Text>
+                  </View>
+                ) : null}
+                <View style={styles.row}>
+                  <Text style={styles.rowLabel}>Pain flags</Text>
+                  <Text style={styles.rowValue}>{stats.v2.recovery.painFlags}</Text>
+                </View>
+                <View style={styles.row}>
+                  <Text style={styles.rowLabel}>Suggestions</Text>
+                  <Text style={styles.rowValue}>
+                    {stats.v2.recovery.suggestions.accepted} accepted · {stats.v2.recovery.suggestions.dismissed} dismissed
+                  </Text>
+                </View>
+              </View>
+            </>
+          ) : null}
 
           <Text style={styles.sectionLabel}>By weekday</Text>
           <View style={styles.card}>

@@ -9,7 +9,9 @@
 // it into adherence makes every month look worse than it is. Ratios are
 // computed over settled (past) days only, with today reported separately.
 
-const { DailyPlan } = require("./models");
+const { DailyPlan, ShiftOp, WorkoutSession, Suggestion } = require("./models");
+const { computeInsightsV2 } = require("./insightsV2");
+const { formatDate } = require("./time");
 
 const GREEN_DAY_THRESHOLD = 0.8;
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -154,6 +156,7 @@ async function computePeriodStats(user, { period = "month", date, today }) {
   let latenessSum = 0;
   let latenessCount = 0;
   let onTimeCount = 0;
+  const lateMinutes = [];
 
   for (const plan of plans) {
     const isToday = plan.date === today;
@@ -220,6 +223,7 @@ async function computePeriodStats(user, { period = "month", date, today }) {
             entry.lateCount += 1;
             latenessSum += lateMin;
             latenessCount += 1;
+            lateMinutes.push(lateMin);
             if (lateMin <= 15) onTimeCount += 1;
           }
         }
@@ -292,6 +296,33 @@ async function computePeriodStats(user, { period = "month", date, today }) {
 
   const streaks = computeStreaks(days);
   const todayEntry = days.find((d) => d.isToday) || null;
+  const [shiftOps, sessions, suggestionRows] = await Promise.all([
+    ShiftOp.find({
+      userId: user._id,
+      date: { $gte: resolved.start, $lte: resolved.end },
+      status: "applied",
+      intent: "shift",
+    }).lean(),
+    WorkoutSession.find({
+      userId: user._id,
+      date: { $gte: resolved.start, $lte: resolved.end },
+    }).lean(),
+    Suggestion.find({ userId: user._id }).select("status type createdAt").lean(),
+  ]);
+  const suggestions = suggestionRows.filter((row) => {
+    const day = formatDate(row.createdAt, user.timezone || "Asia/Kolkata");
+    return day >= resolved.start && day <= resolved.end;
+  });
+  const v2 = computeInsightsV2({
+    plans,
+    shifts: shiftOps,
+    sessions,
+    suggestions,
+    lateMinutes,
+    today,
+    start: resolved.start,
+    end: resolved.end,
+  });
 
   return {
     ...resolved,
@@ -327,6 +358,7 @@ async function computePeriodStats(user, { period = "month", date, today }) {
       .sort((a, b) => b.count - a.count)
       .slice(0, 8),
     timeline: days,
+    v2,
   };
 }
 

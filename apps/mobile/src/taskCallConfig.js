@@ -25,15 +25,18 @@ export function durationOf(item) {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_DURATION_MIN;
 }
 
-export function startMillis(scheduledAt, now = new Date()) {
+export function startMillis(scheduledAt, now = new Date(), planDate) {
   const [hours, minutes] = String(scheduledAt || "").split(":").map(Number);
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return -1;
-  const dateStr = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
+  const clockNow = now instanceof Date ? now : new Date(now);
+  const dateStr =
+    planDate ||
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(clockNow);
   const clock = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
   const at = new Date(`${dateStr}T${clock}:00+05:30`).getTime();
   return Number.isFinite(at) ? at : -1;
@@ -43,7 +46,7 @@ export function endTimeMillis(item) {
   const durationMs = durationOf(item) * 60 * 1000;
   const started = item?.startedAt ? new Date(item.startedAt).getTime() : 0;
   if (Number.isFinite(started) && started > 0) return started + durationMs;
-  const start = startMillis(item?.scheduledAt);
+  const start = startMillis(item?.scheduledAt, new Date(), item?.planDate);
   if (start <= 0) return -1;
   return start + durationMs;
 }

@@ -13,6 +13,7 @@ import {
   openAppSettings,
   openNotificationSettings,
 } from "../ensureWakePermissions";
+import { accessNotes } from "../alarmAccess";
 
 export default function PermissionsScreen() {
   const { colors } = useTheme();
@@ -66,12 +67,16 @@ export default function PermissionsScreen() {
     await requestIgnoreBatteryOptimizations();
   };
 
+  const notes = accessNotes(status);
+  const noteFor = (id) => notes.find((note) => note.id === id)?.text;
+
   return (
     <ScrollView style={styles.page} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <View style={styles.card}>
         <Text style={[styles.hint, { marginBottom: 0 }]}>
-          Android only shows each permission dialog once. If you previously dismissed it, tap the row to
-          open the system page and allow it there.
+          Green means that part can work. Red means it is off. Tap a red row to allow it. If exact alarms,
+          full-screen alerts, or battery access stay off, the app keeps running in the weaker way described
+          on that row.
         </Text>
       </View>
 
@@ -97,7 +102,7 @@ export default function PermissionsScreen() {
           styles={styles}
           colors={colors}
           title="Notifications"
-          detail="Needed so task alerts and the wake alarm can ring when the app is closed."
+          detail={noteFor("notifications") || "Needed so task alerts and the wake alarm can ring when the app is closed."}
           allowed={status?.notifications}
           onPress={onNotifications}
           last={!status?.nativeAlarm}
@@ -108,7 +113,7 @@ export default function PermissionsScreen() {
               styles={styles}
               colors={colors}
               title="Alarms & reminders"
-              detail="Lets Life OS fire task voice cues and the wake alarm at the exact time."
+              detail={noteFor("exact") || "Lets Life OS fire task voice cues and the wake alarm at the exact time."}
               allowed={status?.exactAlarms}
               onPress={onExact}
             />
@@ -116,7 +121,7 @@ export default function PermissionsScreen() {
               styles={styles}
               colors={colors}
               title="Full-screen notifications"
-              detail="Opens the scanner over the lock screen."
+              detail={noteFor("fullScreen") || "Opens the scanner over the lock screen."}
               allowed={status?.fullScreen}
               onPress={onFullScreen}
             />
@@ -124,7 +129,7 @@ export default function PermissionsScreen() {
               styles={styles}
               colors={colors}
               title="Unrestricted battery"
-              detail="Stops the phone from killing the alarm overnight."
+              detail={noteFor("battery") || "Stops the phone from killing the alarm overnight."}
               allowed={status?.battery}
               onPress={onBattery}
               last
@@ -147,8 +152,8 @@ function PermissionRow({ styles, colors, title, detail, allowed, onPress, last }
         <Text style={styles.rowTitle}>{title}</Text>
         <Text style={styles.rowDetail}>{detail}</Text>
       </View>
-      <Text style={[styles.rowStatus, { color: allowed ? colors.success : colors.gold }]}>
-        {allowed ? "Allowed" : "Allow"}
+      <Text style={[styles.rowStatus, { color: allowed ? colors.success : colors.danger }]}>
+        {allowed ? "Allowed" : "Fix"}
       </Text>
     </Pressable>
   );

@@ -1,13 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import { useDispatch, useSelector } from "react-redux";
 import { expireAiMute, fetchSettings, fetchToday } from "../store";
 import { loadApiUrl } from "../apiConfig";
-import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, cancelWakeAlarm, nextWakeMillis, wasWakeAlarmJustDismissed } from "../wakeAlarm";
+import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, wasWakeAlarmJustDismissed } from "../wakeAlarm";
+import { shouldCancelWakeAlarm } from "../alarmAccess";
 import { isVoiceAgentAvailable, cancelVoiceCues, speakNow } from "../voiceAgent";
 import { isTaskAlertsAvailable, getActiveTaskCall, isTaskCallRinging, stopTaskAlert, setTaskAlertsPausedUntil } from "../taskAlerts";
 import { ensureRemindersReady, syncDayReminders } from "../reminderSync";
+import { itemsToArm } from "../horizonItems";
 import { createNavigationContainerRef } from "@react-navigation/native";
 
 export const navigationRef = createNavigationContainerRef();
@@ -73,6 +75,12 @@ export default function AppBackgroundSync() {
   const voiceAlerts = useSelector((s) => s.settings.voiceAlerts);
   const userName = useSelector((s) => s.settings.name);
   const todayItems = useSelector((s) => s.today.data?.items);
+  const todayDate = useSelector((s) => s.today.data?.date);
+  const horizon = useSelector((s) => s.today.horizon);
+  const alarmItems = useMemo(
+    () => itemsToArm(horizon, todayItems, todayDate),
+    [horizon, todayItems, todayDate]
+  );
   const focusBlock = useSelector((s) => s.today.data?.focusBlock);
   const focusPausedUntil = focusBlock?.active && focusBlock?.until ? Date.parse(focusBlock.until) : 0;
   const aiMuteUntil = useSelector((s) => s.aiMute.until);
@@ -118,13 +126,13 @@ export default function AppBackgroundSync() {
           if (until) stopTaskAlert().catch(() => {});
           await setTaskAlertsPausedUntil(until).catch(() => {});
         }
-        await syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
+        await syncDayReminders(alarmItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
       } catch (_e) {
-        syncDayReminders(todayItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
+        syncDayReminders(alarmItems, { voiceAlerts, name: userName, pausedUntil: until }).catch(() => {});
       }
     }, 500);
     return () => clearTimeout(timer);
-  }, [settingsHydrated, todayItems, voiceAlerts, userName, pausedUntil]);
+  }, [settingsHydrated, todayItems, alarmItems, voiceAlerts, userName, pausedUntil]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
@@ -158,14 +166,9 @@ export default function AppBackgroundSync() {
 
   useEffect(() => {
     if (!settingsHydrated || !isWakeAlarmAvailable() || !wakeTarget) return;
-    // Wake alarm follows the server focus block only — a quick AI chat must
-    // never cancel tomorrow's wake alarm.
-    const until = Number.isFinite(focusPausedUntil) && focusPausedUntil > Date.now() ? focusPausedUntil : 0;
-    const nextWake = nextWakeMillis(wakeTarget);
-    if (until && nextWake > 0 && nextWake < until) {
-      cancelWakeAlarm().catch(() => {});
-      return;
-    }
+    // Task calls honor the focus pause. The wake alarm does not: a long mute
+    // that runs through 06:00 must not skip the morning alarm.
+    if (shouldCancelWakeAlarm({ focusUntil: focusPausedUntil, nextWake: wakeTarget })) return;
     scheduleDailyWakeAlarm(wakeTarget).catch(() => {});
   }, [settingsHydrated, wakeTarget, focusPausedUntil]);
 

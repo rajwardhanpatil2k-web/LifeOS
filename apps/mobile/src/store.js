@@ -1,7 +1,12 @@
 import { configureStore, createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import { api } from "./api";
+import { api, isNetworkError } from "./api";
+import { drainOutbox, postOrQueue, clientStamp } from "./outbox";
+import { loadPlanCache, savePlanCache } from "./planCache";
 import { isTaskCallRinging, setTaskAlertsPausedUntil, stopTaskAlert } from "./taskAlerts";
 import { AI_MUTE_GRACE_MS, AI_MUTE_LEASE_MS } from "./taskCallConfig";
+import authReducer from "./authSlice";
+import shiftReducer from "./shiftSlice";
+import workoutReducer from "./workoutSlice";
 
 let mutationEpoch = 0;
 let inflightMutations = 0;
@@ -15,20 +20,56 @@ function noteMutationEnd() {
   inflightMutations = Math.max(0, inflightMutations - 1);
 }
 
-export const fetchToday = createAsyncThunk("today/fetch", async () => {
+export const fetchToday = createAsyncThunk("today/fetch", async (_, { dispatch }) => {
   const epoch = mutationEpoch;
-  const data = await api("/api/today");
-  return { data, epoch };
+  const cached = await loadPlanCache();
+  if (cached?.today) dispatch(showCachedPlan(cached));
+  try {
+    await drainOutbox();
+    const data = await api("/api/today");
+    let horizon = null;
+    try {
+      horizon = await api("/api/horizon?days=3");
+    } catch (err) {
+      if (!isNetworkError(err)) throw err;
+    }
+    await savePlanCache({ today: data, horizon: horizon || cached?.horizon || null });
+    return { data, epoch, horizon: horizon || cached?.horizon || null, offline: false };
+  } catch (err) {
+    if (cached?.today && isNetworkError(err)) {
+      return { data: cached.today, epoch, horizon: cached.horizon || null, offline: true };
+    }
+    throw err;
+  }
 });
 export const fetchWeek = createAsyncThunk("today/week", async () => api("/api/week"));
-export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPayload) => {
+function currentItem(getState, itemId) {
+  const data = getState().today.data;
+  const item = (data?.items || []).find((row) => String(row._id) === String(itemId));
+  return { data, item };
+}
+
+export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPayload, { getState }) => {
   const itemId = String(
     (typeof itemIdOrPayload === "string" ? itemIdOrPayload : itemIdOrPayload?.itemId) || ""
   );
   const source = typeof itemIdOrPayload === "object" ? itemIdOrPayload.source : undefined;
-  return api(`/api/items/${itemId}/complete`, {
-    method: "POST",
-    body: JSON.stringify(source ? { source } : {}),
+  const stamp = clientStamp("complete", itemId);
+  const { data, item } = currentItem(getState, itemId);
+  return postOrQueue({
+    path: `/api/items/${itemId}/complete`,
+    body: { ...stamp, source, date: data?.date },
+    optimistic: item
+      ? {
+          item: {
+            ...item,
+            status: "done",
+            steps: (item.steps || []).map((step) => ({ ...step, done: true })),
+          },
+          score: data?.score,
+          next: data?.next,
+        }
+      : null,
   });
 });
 export const markItemReady = createAsyncThunk("today/ready", async (itemId) =>
@@ -40,15 +81,52 @@ export const snoozeItem = createAsyncThunk("today/snooze", async ({ itemId, minu
 export const remindLaterItem = createAsyncThunk("today/remindLater", async ({ itemId, minutes = 15 }) =>
   api(`/api/items/${itemId}/remind-later`, { method: "POST", body: JSON.stringify({ minutes, source: "task_call" }) })
 );
-export const skipItem = createAsyncThunk("today/skip", async (itemId) =>
-  api(`/api/items/${itemId}/skip`, { method: "POST", body: JSON.stringify({ reason: "skipped" }) })
-);
-export const undoItem = createAsyncThunk("today/undo", async (itemId) =>
-  api(`/api/items/${itemId}/undo`, { method: "POST", body: "{}" })
-);
-export const toggleStep = createAsyncThunk("today/step", async ({ itemId, stepKey }) =>
-  api(`/api/items/${itemId}/steps/${stepKey}`, { method: "POST", body: "{}" })
-);
+export const skipItem = createAsyncThunk("today/skip", async (itemId, { getState }) => {
+  const stamp = clientStamp("skip", itemId);
+  const { data, item } = currentItem(getState, itemId);
+  return postOrQueue({
+    path: `/api/items/${itemId}/skip`,
+    body: { ...stamp, reason: "skipped", date: data?.date },
+    optimistic: item
+      ? { item: { ...item, status: "skipped", skippedReason: "skipped" }, score: data?.score, next: data?.next }
+      : null,
+  });
+});
+export const undoItem = createAsyncThunk("today/undo", async (itemId, { getState }) => {
+  const stamp = clientStamp("undo", itemId);
+  const { data, item } = currentItem(getState, itemId);
+  return postOrQueue({
+    path: `/api/items/${itemId}/undo`,
+    body: { ...stamp, date: data?.date },
+    optimistic: item
+      ? {
+          item: {
+            ...item,
+            status: "pending",
+            skippedReason: undefined,
+            startedAt: undefined,
+            steps: (item.steps || []).map((step) => ({ ...step, done: false })),
+          },
+          score: data?.score,
+          next: data?.next,
+        }
+      : null,
+  });
+});
+export const toggleStep = createAsyncThunk("today/step", async ({ itemId, stepKey }, { getState }) => {
+  const stamp = clientStamp("step", `${itemId}-${stepKey}`);
+  const { data, item } = currentItem(getState, itemId);
+  const steps = (item?.steps || []).map((step) =>
+    step.key === stepKey ? { ...step, done: !step.done } : step
+  );
+  const allDone = steps.length > 0 && steps.every((step) => step.done);
+  const status = allDone ? "done" : item?.status === "done" ? "pending" : item?.status;
+  return postOrQueue({
+    path: `/api/items/${itemId}/steps/${stepKey}`,
+    body: { ...stamp, date: data?.date },
+    optimistic: item ? { item: { ...item, steps, status }, score: data?.score, next: data?.next } : null,
+  });
+});
 // `order` is the new id sequence for whichever subset of today's items was
 // just dragged — the server reassigns them across their own existing time
 // slots, so nothing outside that subset is touched.
@@ -167,6 +245,17 @@ const todaySlice = createSlice({
     error: null,
     data: null,
     week: null,
+    horizon: null,
+    offline: false,
+  },
+  reducers: {
+    showCachedPlan(state, action) {
+      if (state.data) return;
+      state.data = action.payload.today;
+      state.horizon = action.payload.horizon || state.horizon;
+      state.offline = true;
+      state.loading = false;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -180,6 +269,8 @@ const todaySlice = createSlice({
         if (state.latestFetchId !== action.meta.requestId) return;
         if (action.payload.epoch !== mutationEpoch || inflightMutations > 0) return;
         state.data = action.payload.data;
+        state.offline = action.payload.offline === true;
+        if (action.payload.horizon) state.horizon = action.payload.horizon;
       })
       .addCase(fetchToday.rejected, (state, action) => {
         if (state.latestFetchId !== action.meta.requestId) return;
@@ -235,6 +326,8 @@ const todaySlice = createSlice({
   },
 });
 
+export const { showCachedPlan } = todaySlice.actions;
+
 const daySlice = createSlice({
   name: "day",
   initialState: {
@@ -281,6 +374,7 @@ const settingsSlice = createSlice({
     prepTarget: "20:00",
     themeMode: "dark",
     voiceAlerts: true,
+    aiEnabled: true,
     name: "Raj",
     hydrated: false,
   },
@@ -299,6 +393,7 @@ const settingsSlice = createSlice({
         state.prepTarget = action.payload.prepTarget || "20:00";
         state.themeMode = action.payload.themeMode || "dark";
         state.voiceAlerts = action.payload.voiceAlerts !== false;
+        state.aiEnabled = action.payload.aiEnabled !== false;
         state.name = action.payload.name || "Raj";
       })
       .addCase(fetchSettings.rejected, (state, action) => {
@@ -312,6 +407,7 @@ const settingsSlice = createSlice({
         // instead of waiting on the round trip, then reconcile on fulfilled.
         if (action.meta.arg.themeMode) state.themeMode = action.meta.arg.themeMode;
         if (typeof action.meta.arg.voiceAlerts === "boolean") state.voiceAlerts = action.meta.arg.voiceAlerts;
+        if (typeof action.meta.arg.aiEnabled === "boolean") state.aiEnabled = action.meta.arg.aiEnabled;
       })
       .addCase(updateSettings.fulfilled, (state, action) => {
         state.saving = false;
@@ -322,6 +418,7 @@ const settingsSlice = createSlice({
         state.prepTarget = action.payload.prepTarget || "20:00";
         state.themeMode = action.payload.themeMode || "dark";
         state.voiceAlerts = action.payload.voiceAlerts !== false;
+        state.aiEnabled = action.payload.aiEnabled !== false;
         state.name = action.payload.name || "Raj";
       })
       .addCase(updateSettings.rejected, (state, action) => {
@@ -449,5 +546,8 @@ export const store = configureStore({
     settings: settingsSlice.reducer,
     insights: insightsSlice.reducer,
     aiMute: aiMuteSlice.reducer,
+    auth: authReducer,
+    shift: shiftReducer,
+    workout: workoutReducer,
   },
 });

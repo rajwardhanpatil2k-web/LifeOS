@@ -22,12 +22,11 @@ const {
   parseSkipReason,
   parseSkipTitleQuery,
   detectSkipScope,
-  skipRemainingToday,
-  skipSelected,
-  skipNamed,
-  previewForSkip,
 } = require("./skipTasks");
-const { detectShift, isBlanketShift, applyTaskShift } = require("./shiftTasks");
+const { detectShift, isBlanketShift } = require("./shiftTasks");
+const { classifySafety, DECLINE_MESSAGE } = require("./ai/safetyGate");
+const { fromLegacy } = require("./ai/intentSchema");
+const { openShiftPreview, openSkipPreview } = require("./shifts");
 
 const DOMAINS = LIFE_AREAS.map((area) => area.key);
 
@@ -318,9 +317,17 @@ function normalizeParsed(data, fallback) {
 // still works when OpenAI is slow or down.
 const LOCAL_ONLY_INTENTS = new Set(["pause_focus", "resume_focus", "extend_focus"]);
 
-async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
+function needsCloud(transcript, parsed) {
+  if (parsed.intent === "unknown") return true;
+  if (parsed.intent !== "add_task") return false;
+  if (parseSpokenClock(transcript)) return false;
+  if (/\b(?:add (?:a |the )?task|remind me to|i (?:need|have|want) to|task of)\b/i.test(transcript)) return false;
+  return true;
+}
+
+async function parseAssistantRequest(transcript, plan, { itemIds = [], allowModel = true } = {}) {
   const fallback = fallbackAssistant(transcript, { itemIds });
-  if (LOCAL_ONLY_INTENTS.has(fallback.intent)) {
+  if (!allowModel || LOCAL_ONLY_INTENTS.has(fallback.intent)) {
     return { ...normalizeParsed(null, fallback), ...fallback, intent: fallback.intent };
   }
   const nowHHMM = hhmmIST();
@@ -394,30 +401,50 @@ async function parseAssistantRequest(transcript, plan, { itemIds = [] } = {}) {
 }
 
 async function runAssistant(user, plan, transcript, { itemIds = [] } = {}) {
-  const parsed = await parseAssistantRequest(transcript, plan, { itemIds });
+  const safety = classifySafety(transcript);
+  if (safety) {
+    return {
+      intent: "ai_declined",
+      declined: true,
+      category: safety.category,
+      error: DECLINE_MESSAGE,
+    };
+  }
+  const allowModel = user?.aiEnabled !== false;
+  const parsed = await parseAssistantRequest(transcript, plan, { itemIds, allowModel });
+  const checked = fromLegacy(parsed, plan?.items || []);
+  if (!checked.ok && parsed.intent !== "unknown") {
+    return { intent: "unknown", parsed, error: checked.error };
+  }
+  if (checked.ok) {
+    parsed.reason = checked.intent.reason;
+    parsed.offsetMin = checked.intent.offsetMin;
+    if (checked.intent.targetIds.length || (parsed.taskIds || []).length) {
+      parsed.taskIds = checked.intent.targetIds;
+    }
+  }
+  if (!allowModel && needsCloud(transcript, parsed)) {
+    return {
+      intent: "unknown",
+      parsed,
+      error: "Cloud AI is off. I can still mute alarms, shift, skip, or add a task when the wording is clear.",
+    };
+  }
 
   if (parsed.intent === "skip_tasks") {
     const reason = parsed.reason || parseSkipReason(transcript);
-    let result;
-    if (parsed.skipScope === "selected") {
-      if (!itemIds.length) {
-        return { intent: "unknown", parsed, error: "Select the tasks first, then tell me why you're skipping them." };
-      }
-      result = skipSelected(plan, itemIds, reason);
-    } else if (parsed.skipScope === "named") {
-      result = skipNamed(plan, parsed.titleQuery, reason);
-    } else {
-      result = skipRemainingToday(plan, reason);
+    if (parsed.skipScope === "selected" && !itemIds.length) {
+      return { intent: "unknown", parsed, error: "Select the tasks first, then tell me why you're skipping them." };
     }
-    if (!result.skipped.length) {
-      return { intent: "unknown", parsed, error: "Nothing pending to skip. The wake alarm stays on." };
-    }
-    return {
-      intent: "skip_tasks",
-      parsed,
-      preview: previewForSkip(result),
-      skipped: result.skipped,
-    };
+    const preview = await openSkipPreview(user, plan, {
+      scope: parsed.skipScope || "today",
+      itemIds,
+      titleQuery: parsed.titleQuery,
+      reason,
+      source: "ai",
+    });
+    if (!preview.ok) return { intent: "unknown", parsed, error: preview.error };
+    return { intent: "skip_tasks", parsed, ...preview };
   }
 
   if (parsed.intent === "pause_focus") {
@@ -464,20 +491,13 @@ async function runAssistant(user, plan, transcript, { itemIds = [] } = {}) {
   if (parsed.intent === "shift_tasks") {
     const spoken = detectShift(transcript);
     const offsetMin = spoken?.offsetMin || parsed.offsetMin;
-    const result = await applyTaskShift(user, plan, {
+    const preview = await openShiftPreview(user, plan, {
       offsetMin,
-      taskIds: isBlanketShift(transcript) ? [] : parsed.taskIds,
-      nowHHMM: hhmmIST(),
+      targetIds: isBlanketShift(transcript) ? [] : parsed.taskIds,
+      source: "ai",
     });
-    if (!result.ok) {
-      return { intent: "unknown", parsed, error: result.error || "Nothing left to shift." };
-    }
-    return {
-      intent: "shift_tasks",
-      parsed: { ...parsed, offsetMin: result.offsetMin },
-      preview: result.preview,
-      shifted: result.shifted,
-    };
+    if (!preview.ok) return { intent: "unknown", parsed, error: preview.error || "Nothing left to shift." };
+    return { intent: "shift_tasks", parsed: { ...parsed, offsetMin }, ...preview };
   }
 
   if (parsed.intent === "defer_task") {

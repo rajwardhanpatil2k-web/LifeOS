@@ -60,6 +60,7 @@ Short records of the key choices in [SPEC.md](SPEC.md), written so you can learn
 - **Why:** it meets "static login kept in the DB" while fixing the real problem: the API is currently open to anyone with the URL. Opaque tokens beat JWT here because delete-all and password change must revoke instantly.
 - **Rejected:** JWT (can't be revoked without extra state), storing the token in plain AsyncStorage (not encrypted), full sign-in system (overkill for one user).
 - **Trade-off:** `expo-secure-store` is a native module, so the next APK must be rebuilt anyway.
+- **Status (M1, this branch only):** implemented. Not deployed. The demo tag `demo-2026-10-20` has no login, so the installed APK still works against the live server.
 
 ### D11. Learn mode content is curated, not generated
 - **Choice:** "Why this?", form cues and mistakes are static text in the DB, written once and reviewed.

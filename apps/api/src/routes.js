@@ -4,6 +4,7 @@ const {
   DailyPlan,
   LifeEvent,
   DailyScore,
+  MutationReceipt,
 } = require("./models");
 const { LIFE_AREAS, seasonalFruitsForMonth } = require("./seed/rajRoutine");
 const { computePeriodStats } = require("./insights");
@@ -12,6 +13,11 @@ const { isAiEnabled } = require("./ai");
 const { mergeCarryForwards, setCarryForwardStatus, syncCarryForwardFields } = require("./voiceTask");
 const { mergeTomorrowPrep, previewPrepItem, isLockedItem, PREP_KEY } = require("./tomorrowPrep");
 const { runAssistant } = require("./voiceAssistant");
+const { formatDate, formatHHMM, DEFAULT_TZ } = require("./time");
+const { horizonDates } = require("./horizon");
+const { toScheduleFile, validateSchedule, mergeDay } = require("./scheduleFile");
+const { shouldApply } = require("./outbox");
+const { withPainNote } = require("./ai/painPrompt");
 const {
   publicFocusBlock,
   expireFocusBlockIfNeeded,
@@ -23,12 +29,7 @@ const {
 
 function todayIST(dateInput) {
   if (dateInput) return dateInput;
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
+  return formatDate(new Date(), DEFAULT_TZ);
 }
 
 function weekdayFromDate(dateStr) {
@@ -37,12 +38,7 @@ function weekdayFromDate(dateStr) {
 }
 
 function nowHHMM() {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Kolkata",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
+  return formatHHMM(new Date(), DEFAULT_TZ);
 }
 
 function toMinutes(hhmm) {
@@ -85,6 +81,16 @@ function computeShiftMinutes(templateItems, targetTime, anchorKey) {
   return toMinutes(targetTime) - toMinutes(base.scheduledAt);
 }
 
+// When a baseline is stored, the template clock is the plan until the user
+// moves that setting. The move is the same number of minutes on every day,
+// added to that day's own template clock.
+function anchorTarget(templateItems, setting, baseline, anchorKey) {
+  const base = (templateItems || []).find((item) => item.key === anchorKey);
+  if (!setting || !base) return setting || "";
+  if (!baseline || baseline === setting) return base.scheduledAt;
+  return shiftTime(base.scheduledAt, toMinutes(setting) - toMinutes(baseline)) || base.scheduledAt;
+}
+
 function shiftForAnchor(item, wakeShiftMin, homeShiftMin) {
   if (item.anchor === "fixed") return item.scheduledAt;
   const delta = item.anchor === "home" ? homeShiftMin : wakeShiftMin;
@@ -92,9 +98,15 @@ function shiftForAnchor(item, wakeShiftMin, homeShiftMin) {
 }
 
 function effectiveShifts(templateItems, user) {
-  const wakeShiftMin = computeShiftMinutes(templateItems, user.wakeTarget, "wake");
+  const wakeSetting = user.wakeBaseline
+    ? anchorTarget(templateItems, user.wakeTarget, user.wakeBaseline, "wake")
+    : user.wakeTarget;
+  const homeSetting = user.homeBaseline
+    ? anchorTarget(templateItems, user.homeTarget, user.homeBaseline, "home")
+    : user.homeTarget;
+  const wakeShiftMin = computeShiftMinutes(templateItems, wakeSetting, "wake");
   const homeShiftMin = anchorsAreOrdered(user)
-    ? computeShiftMinutes(templateItems, user.homeTarget, "home")
+    ? computeShiftMinutes(templateItems, homeSetting, "home")
     : 0;
   return { wakeShiftMin, homeShiftMin };
 }
@@ -175,6 +187,9 @@ function nextAction(items, hhmm) {
 }
 
 async function getUser() {
+  const { currentRequestUser } = require("./auth/context");
+  const bound = currentRequestUser();
+  if (bound) return bound;
   let user = await User.findOne({ name: "Raj" });
   if (!user) {
     const { seed } = require("./seed/run");
@@ -192,25 +207,34 @@ async function ensureDailyPlan(user, date) {
     return plan;
   }
   const weekday = weekdayFromDate(date);
-  const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
+  const template = await RoutineTemplate.findOne({ userId: user._id, weekday, approved: { $ne: false } });
   if (!template) throw new Error("No template for weekday " + weekday);
   const { wakeShiftMin, homeShiftMin } = effectiveShifts(template.items, user);
   const scheduled = fillSeasonalFruit(applyShifts(template.items, wakeShiftMin, homeShiftMin), date);
-  plan = await DailyPlan.create({
-    userId: user._id,
-    date,
-    weekday,
-    dayType: template.dayType,
-    items: scheduled.map((item) => ({
-      ...item,
-      status: "pending",
-      steps: (item.steps || []).map((s) => ({ ...s, done: false })),
-    })),
-    generatedFrom: template.version,
-    status: "active",
-    wakeShiftMin,
-    homeShiftMin,
-  });
+  try {
+    plan = await DailyPlan.create({
+      userId: user._id,
+      date,
+      weekday,
+      dayType: template.dayType,
+      items: scheduled.map((item) => ({
+        ...item,
+        status: "pending",
+        steps: (item.steps || []).map((s) => ({ ...s, done: false })),
+      })),
+      generatedFrom: template.version,
+      status: "active",
+      wakeShiftMin,
+      homeShiftMin,
+    });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      plan = await DailyPlan.findOne({ userId: user._id, date });
+      if (!plan) throw err;
+    } else {
+      throw err;
+    }
+  }
   await mergeCarryForwards(user, plan);
   await mergeTomorrowPrep(user, plan);
   return plan;
@@ -254,6 +278,31 @@ function findPlanItem(plan, itemId) {
   );
 }
 
+async function acceptClientWrite(user, { clientId, itemId, field, clientAt }) {
+  if (!clientId) return { apply: true };
+  const at = Number(clientAt);
+  const clientAtMs = Number.isFinite(at) ? at : Date.now();
+  const itemKey = String(itemId);
+  const existing = await MutationReceipt.findOne({ userId: user._id, clientId: String(clientId) });
+  if (existing) return { apply: false, duplicate: true };
+  const latest = await MutationReceipt.findOne({ userId: user._id, itemId: itemKey, field }).sort({ clientAt: -1 });
+  const decision = shouldApply(latest, { clientId, clientAt: clientAtMs });
+  try {
+    await MutationReceipt.create({
+      userId: user._id,
+      clientId: String(clientId),
+      itemId: itemKey,
+      field,
+      clientAt: clientAtMs,
+      applied: decision.apply === true,
+    });
+  } catch (err) {
+    if (err && err.code === 11000) return { apply: false, duplicate: true };
+    throw err;
+  }
+  return decision;
+}
+
 async function logSkippedItems(user, date, skipped, source = "focus_block") {
   for (const item of skipped || []) {
     await LifeEvent.create({
@@ -275,9 +324,101 @@ async function logSkippedDuringFocus(user, date, skipped) {
 }
 
 function registerRoutes(app) {
+  require("./workout/routes").registerWorkoutRoutes(app, { wrap, getUser });
+  require("./privacy").registerPrivacyRoutes(app, { wrap, getUser, models: require("./models") });
+
+  app.get("/api/schedule", wrap(async (_req, res) => {
+    const user = await getUser();
+    const templates = await RoutineTemplate.find({ userId: user._id }).sort({ weekday: 1 });
+    const file = toScheduleFile(templates);
+    if (!file.ok) return res.status(409).json({ error: file.error });
+    res.set("Content-Disposition", 'attachment; filename="life-os-schedule.json"');
+    res.json(file.schedule);
+  }));
+
+  app.post("/api/schedule/import", wrap(async (req, res) => {
+    const checked = validateSchedule(req.body);
+    if (!checked.ok) {
+      return res.status(400).json({ error: "The schedule file has problems.", errors: checked.errors });
+    }
+    const user = await getUser();
+    for (const day of checked.days) {
+      await RoutineTemplate.findOneAndUpdate(
+        { userId: user._id, weekday: day.weekday },
+        {
+          $set: {
+            dayType: day.dayType,
+            items: day.items,
+            version: checked.version,
+            approved: true,
+          },
+          $setOnInsert: { userId: user._id, weekday: day.weekday },
+        },
+        { upsert: true }
+      );
+    }
+    const today = formatDate(new Date());
+    const plans = await DailyPlan.find({ userId: user._id, date: { $gte: today } });
+    for (const plan of plans) {
+      const day = checked.days.find((row) => row.weekday === plan.weekday);
+      if (!day) continue;
+      plan.dayType = day.dayType;
+      plan.items = mergeDay(plan.items, day.items);
+      plan.generatedFrom = checked.version;
+      if (typeof plan.markModified === "function") plan.markModified("items");
+      await plan.save();
+    }
+    res.json({ ok: true, days: checked.days.length, plansUpdated: plans.length });
+  }));
+  const { openShiftPreview, confirmShift, undoShiftOp } = require("./shifts");
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "life-os-api" });
   });
+
+  app.post("/api/shifts/preview", wrap(async (req, res) => {
+    const user = await getUser();
+    const date = todayIST(req.body.date);
+    const plan = await ensureDailyPlan(user, date);
+    const preview = await openShiftPreview(user, plan, {
+      offsetMin: req.body.offsetMin,
+      targetIds: Array.isArray(req.body.targetIds) ? req.body.targetIds : [],
+      source: "manual",
+    });
+    if (!preview.ok) return res.status(400).json(preview);
+    res.json(preview);
+  }));
+
+  app.post("/api/shifts/confirm", wrap(async (req, res) => {
+    const user = await getUser();
+    const result = await confirmShift(user, req.body?.token);
+    if (!result.ok) return res.status(409).json({ error: result.error || "plan changed, preview again" });
+    const scored = result.plan ? await saveScore(user, result.plan) : null;
+    res.json({
+      ok: true,
+      idempotent: Boolean(result.idempotent),
+      shiftId: result.shiftId,
+      undoUntil: result.undoUntil,
+      items: result.plan?.items || [],
+      score: scored,
+      next: result.plan ? nextAction(result.plan.items, nowHHMM()) : null,
+    });
+  }));
+
+  app.post("/api/shifts/:id/undo", wrap(async (req, res) => {
+    const user = await getUser();
+    const result = await undoShiftOp(user, req.params.id);
+    if (!result.ok) return res.status(400).json({ error: result.error || "Nothing to undo." });
+    const scored = await saveScore(user, result.plan);
+    res.json({
+      ok: true,
+      restored: result.restored,
+      leftAlone: result.leftAlone,
+      items: result.plan.items,
+      score: scored,
+      next: nextAction(result.plan.items, nowHHMM()),
+    });
+  }));
 
   app.get("/api/me", wrap(async (_req, res) => {
     const user = await getUser();
@@ -306,11 +447,28 @@ function registerRoutes(app) {
       dayType: plan.dayType,
       now: hhmm,
       next: nextAction(plan.items, hhmm),
-      items: plan.items,
+      items: withPainNote(plan.items),
       score: scored,
       focus: ["skin", "hair", "fitness", "learning"],
       focusBlock: publicFocusBlock(user),
     });
+  }));
+
+  app.get("/api/horizon", wrap(async (req, res) => {
+    const user = await getUser();
+    const today = todayIST();
+    const dates = horizonDates(today, req.query.days);
+    const days = [];
+    for (const date of dates) {
+      const plan = await ensureDailyPlan(user, date);
+      days.push({
+        date,
+        weekday: plan.weekday,
+        dayType: plan.dayType,
+        items: withPainNote(plan.items),
+      });
+    }
+    res.json({ today, days });
   }));
 
   app.post("/api/items/:itemId/complete", wrap(async (req, res) => {
@@ -319,6 +477,15 @@ function registerRoutes(app) {
     const plan = await ensureDailyPlan(user, date);
     const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
+    const gate = await acceptClientWrite(user, {
+      clientId: req.body.clientId,
+      itemId: item._id,
+      field: "status",
+      clientAt: req.body.clientAt,
+    });
+    if (!gate.apply) {
+      return res.json({ item, already: true, next: nextAction(plan.items, nowHHMM()) });
+    }
     item.status = "done";
     clearItemHold(item);
     (item.steps || []).forEach((s) => {
@@ -350,8 +517,17 @@ function registerRoutes(app) {
     if (isLockedItem(item) || item.alarmMode === "scan_dismiss") {
       return res.status(400).json({ error: "This item stays on today's plan." });
     }
-    if (item.status === "done") {
+    if (item.status === "done" && !req.body.clientId) {
       return res.status(400).json({ error: "Item is already done" });
+    }
+    const gate = await acceptClientWrite(user, {
+      clientId: req.body.clientId,
+      itemId: item._id,
+      field: "status",
+      clientAt: req.body.clientAt,
+    });
+    if (!gate.apply) {
+      return res.json({ item, already: true, next: nextAction(plan.items, nowHHMM()) });
     }
     item.status = "skipped";
     item.skippedReason = req.body.reason || "skipped";
@@ -376,6 +552,15 @@ function registerRoutes(app) {
     const plan = await ensureDailyPlan(user, date);
     const item = findPlanItem(plan, req.params.itemId);
     if (!item) return res.status(404).json({ error: "Item not found" });
+    const gate = await acceptClientWrite(user, {
+      clientId: req.body.clientId,
+      itemId: item._id,
+      field: "status",
+      clientAt: req.body.clientAt,
+    });
+    if (!gate.apply) {
+      return res.json({ item, already: true, next: nextAction(plan.items, nowHHMM()) });
+    }
     const previousStatus = item.status;
     item.status = "pending";
     item.skippedReason = undefined;
@@ -410,6 +595,15 @@ function registerRoutes(app) {
     if (!item) return res.status(404).json({ error: "Item not found" });
     const step = item.steps.find((s) => s.key === req.params.stepKey);
     if (!step) return res.status(404).json({ error: "Step not found" });
+    const gate = await acceptClientWrite(user, {
+      clientId: req.body.clientId,
+      itemId: item._id,
+      field: `step:${step.key}`,
+      clientAt: req.body.clientAt,
+    });
+    if (!gate.apply) {
+      return res.json({ item, already: true, next: nextAction(plan.items, nowHHMM()) });
+    }
     // The mobile client always POSTs an empty body — this is a genuine
     // toggle (flip whatever it currently is), not "always mark done". An
     // explicit boolean is still honored for any other caller that wants to
@@ -694,6 +888,28 @@ function registerRoutes(app) {
     const itemIds = Array.isArray(req.body.itemIds) ? req.body.itemIds.map((id) => String(id)).filter(Boolean) : [];
 
     const result = await runAssistant(user, plan, transcript, { itemIds });
+    if (result.declined) {
+      await LifeEvent.create({
+        userId: user._id,
+        date,
+        domain: "health",
+        type: "ai_declined",
+        status: "declined",
+        meta: { category: result.category },
+        source: "ai",
+      });
+      return res.json({ intent: "ai_declined", error: result.error, items: plan.items });
+    }
+    if (result.needsConfirm) {
+      return res.json({
+        intent: result.intent,
+        needsConfirm: true,
+        preview: result.preview,
+        shift: result.shift,
+        items: plan.items,
+        focusBlock: publicFocusBlock(user),
+      });
+    }
     if (result.intent === "unknown") {
       return res.status(400).json({
         error: result.error || "I can add a task, pause alarms, skip tasks, or remind you later.",
@@ -858,12 +1074,13 @@ function registerRoutes(app) {
       prepTarget: user.prepTarget || "20:00",
       themeMode: user.themeMode,
       voiceAlerts: user.voiceAlerts !== false,
+      aiEnabled: user.aiEnabled !== false,
     });
   }));
 
   app.put("/api/settings", wrap(async (req, res) => {
     const user = await getUser();
-    const { wakeTarget, homeTarget, themeMode, voiceAlerts, prepTarget } = req.body || {};
+    const { wakeTarget, homeTarget, themeMode, voiceAlerts, prepTarget, aiEnabled } = req.body || {};
     const nextWake = wakeTarget && TIME_RE.test(wakeTarget) ? wakeTarget : user.wakeTarget;
     const nextHome = homeTarget && TIME_RE.test(homeTarget) ? homeTarget : user.homeTarget;
     const nextUser = {
@@ -882,6 +1099,7 @@ function registerRoutes(app) {
     if (prepTarget && TIME_RE.test(prepTarget)) user.prepTarget = prepTarget;
     if (themeMode === "dark" || themeMode === "light") user.themeMode = themeMode;
     if (typeof voiceAlerts === "boolean") user.voiceAlerts = voiceAlerts;
+    if (typeof aiEnabled === "boolean") user.aiEnabled = aiEnabled;
     await user.save();
 
     const date = todayIST();
@@ -889,7 +1107,7 @@ function registerRoutes(app) {
     let scored = null;
     if (plan) {
       const weekday = weekdayFromDate(date);
-      const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
+      const template = await RoutineTemplate.findOne({ userId: user._id, weekday, approved: { $ne: false } });
       if (template) {
         const { wakeShiftMin: newWakeShift, homeShiftMin: newHomeShift } = effectiveShifts(template.items, user);
         // Recompute pending items straight from the immutable template
@@ -929,6 +1147,7 @@ function registerRoutes(app) {
       prepTarget: user.prepTarget || "20:00",
       themeMode: user.themeMode,
       voiceAlerts: user.voiceAlerts !== false,
+      aiEnabled: user.aiEnabled !== false,
       today: plan ? { items: plan.items, score: scored, next: nextAction(plan.items, nowHHMM()) } : null,
     });
   }));
@@ -967,7 +1186,7 @@ function registerRoutes(app) {
     }
 
     const weekday = weekdayFromDate(date);
-    const template = await RoutineTemplate.findOne({ userId: user._id, weekday });
+    const template = await RoutineTemplate.findOne({ userId: user._id, weekday, approved: { $ne: false } });
     if (!template) return res.status(404).json({ error: "No template for that day" });
     const { wakeShiftMin, homeShiftMin } = effectiveShifts(template.items, user);
     const items = fillSeasonalFruit(applyShifts(template.items, wakeShiftMin, homeShiftMin), date).map((item) => ({
@@ -1004,6 +1223,7 @@ function registerRoutes(app) {
       const template = await RoutineTemplate.findOne({
         userId: user._id,
         weekday: dt.getUTCDay(),
+        approved: { $ne: false },
       });
       days.push({
         date,
@@ -1071,4 +1291,4 @@ function registerRoutes(app) {
   }));
 }
 
-module.exports = { registerRoutes, applyShifts, scorePlan, anchorsAreOrdered };
+module.exports = { registerRoutes, applyShifts, scorePlan, anchorsAreOrdered, effectiveShifts };

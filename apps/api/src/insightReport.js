@@ -8,6 +8,8 @@
 const crypto = require("crypto");
 const { InsightReport } = require("./models");
 const { chatJson, isAiEnabled } = require("./ai");
+const { classifySafety } = require("./ai/safetyGate");
+const { formatInsightsV2 } = require("./insightsV2");
 
 const SYSTEM_PROMPT = `You are Raj's accountability coach inside Life OS, a personal life-tracking app.
 He is working on four priorities: skin care, hair care, workout/fitness, and study (DSA + system design).
@@ -23,7 +25,8 @@ You will receive ALREADY-COMPUTED statistics. Rules:
 - Actions: 2-4 concrete, small changes for the next period. Prefer shrinking a task over dropping it
   (e.g. "cut study to 15 focused minutes on Thursdays" beats "study more").
 - verdict: one short blunt line, max 12 words, that he'll see at the top.
-- Write in second person ("you"). Keep the summary under 90 words.`;
+- Write in second person ("you"). Keep the summary under 90 words.
+- Do not diagnose, prescribe, or say whether training, food, supplements, or skin care is safe. If a count of flags or soreness is in the input, cite the count only.`;
 
 const REPORT_SCHEMA = {
   type: "object",
@@ -108,7 +111,13 @@ function buildDigest(stats) {
     );
   }
 
+  lines.push(...formatInsightsV2(stats.v2));
+
   return lines.join("\n");
+}
+
+function reportText(data) {
+  return [data?.verdict, data?.summary, ...(data?.wins || []), ...(data?.leaks || []), ...(data?.actions || [])].join("\n");
 }
 
 function hashDigest(digest) {
@@ -197,6 +206,8 @@ async function getInsightReport(user, stats, { refresh = false } = {}) {
     return fallbackReport(stats, "openai_unavailable");
   }
 
+  const declined = classifySafety(reportText(result.data));
+  const safe = declined ? fallbackReport(stats, "safety") : null;
   const saved = await InsightReport.findOneAndUpdate(
     { userId: user._id, period: stats.period, periodKey: stats.periodKey },
     {
@@ -204,14 +215,14 @@ async function getInsightReport(user, stats, { refresh = false } = {}) {
       period: stats.period,
       periodKey: stats.periodKey,
       statsHash,
-      verdict: result.data.verdict,
-      summary: result.data.summary,
+      verdict: safe ? safe.verdict : result.data.verdict,
+      summary: safe ? safe.summary : result.data.summary,
       // Hard caps regardless of what the model returns — the cards are a
       // glance, not a wall of text.
-      wins: (result.data.wins || []).slice(0, 3),
-      leaks: (result.data.leaks || []).slice(0, 4),
-      actions: (result.data.actions || []).slice(0, 4),
-      model: result.model,
+      wins: safe ? safe.wins : (result.data.wins || []).slice(0, 3),
+      leaks: safe ? safe.leaks : (result.data.leaks || []).slice(0, 4),
+      actions: safe ? safe.actions : (result.data.actions || []).slice(0, 4),
+      model: safe ? "safety-gate" : result.model,
       usage: result.usage || {},
     },
     { upsert: true, new: true }

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useFocusEffect } from "@react-navigation/native";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useDispatch, useSelector } from "react-redux";
 import { completeItem, fetchToday, reorderItems, skipItem, toggleStep, undoItem, resumeFocus, extendFocus } from "../store";
@@ -10,6 +11,9 @@ import DraggableList from "../components/DraggableList";
 import AiTaskComposer from "../components/AiTaskComposer";
 import { ensureRemindersReady } from "../reminderSync";
 import { formatClock12, formatIsoClock12 } from "../formatTime";
+import { PAIN_LINE } from "../painPrompt";
+import { accessNotes } from "../alarmAccess";
+import { canScheduleExactAlarms, isWakeAlarmAvailable } from "../wakeAlarm";
 
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DOUBLE_TAP_MS = 350;
@@ -17,20 +21,32 @@ const DOUBLE_TAP_MS = 350;
 export default function TodayScreen({ navigation }) {
   const dispatch = useDispatch();
   const data = useSelector((s) => s.today.data);
+  const offline = useSelector((s) => s.today.offline);
   const loading = useSelector((s) => s.today.loading);
   const error = useSelector((s) => s.today.error);
   const focusBlock = data?.focusBlock;
   const [remindersEnabled, setRemindersEnabled] = useState(true);
+  const [exactAlarms, setExactAlarms] = useState(true);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
   const { colors, domainMeta } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  useEffect(() => {
-    ensureRemindersReady()
-      .then(setRemindersEnabled)
-      .catch(() => setRemindersEnabled(false));
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      ensureRemindersReady()
+        .then(setRemindersEnabled)
+        .catch(() => setRemindersEnabled(false));
+      if (!isWakeAlarmAvailable()) {
+        setExactAlarms(true);
+        return undefined;
+      }
+      canScheduleExactAlarms()
+        .then((allowed) => setExactAlarms(allowed !== false))
+        .catch(() => setExactAlarms(true));
+      return undefined;
+    }, [])
+  );
 
   useEffect(() => {
     if (!navigation || data?.weekday == null) return;
@@ -72,9 +88,20 @@ export default function TodayScreen({ navigation }) {
         selectMode={selectMode}
         selected={selectedSet.has(String(item._id))}
         onToggleSelect={() => toggleSelected(item._id)}
+        onLogWorkout={
+          item.category === "workout" || item.key === "workout"
+            ? () =>
+                navigation.navigate("Workout", {
+                  itemId: String(item._id),
+                  title: item.title,
+                  weekday: data?.weekday,
+                  steps: (item.steps || []).map((step) => step.key),
+                })
+            : undefined
+        }
       />
     ),
-    [styles, domainMeta, selectMode, selectedSet, toggleSelected]
+    [styles, domainMeta, selectMode, selectedSet, toggleSelected, navigation, data?.weekday]
   );
 
   const focusStats = useMemo(() => {
@@ -125,11 +152,20 @@ export default function TodayScreen({ navigation }) {
         </View>
       </View>
 
+      {offline ? (
+        <Text style={styles.reminderWarning}>Offline. Showing the saved plan. Changes will send when you’re back.</Text>
+      ) : null}
+
       {!remindersEnabled ? (
-        <Text style={styles.reminderWarning}>
+        <Text style={styles.reminderWarning} onPress={() => navigation.navigate("Settings", { screen: "Permissions" })}>
           Reminders are off — enable notifications for Life OS in system settings to get alerts.
         </Text>
       ) : null}
+      {exactAlarms ? null : (
+        <Text style={styles.reminderWarning} onPress={() => navigation.navigate("Settings", { screen: "Permissions" })}>
+          {accessNotes({ exactAlarms: false })[0].text} Tap to fix.
+        </Text>
+      )}
 
       <Pressable style={styles.editScheduleBtn} onPress={() => navigation.navigate("EditSchedule")}>
         <Text style={styles.editScheduleBtnText}>Edit schedule & add tasks</Text>
@@ -185,6 +221,7 @@ const ItemCard = memo(function ItemCard({
   selectMode,
   selected,
   onToggleSelect,
+  onLogWorkout,
 }) {
   const dispatch = useDispatch();
   const meta = domainMeta(item.domain);
@@ -257,6 +294,9 @@ const ItemCard = memo(function ItemCard({
           {formatClock12(item.scheduledAt)} · {item.durationMin}m
         </Text>
       </Pressable>
+      {item.domain === "fitness" || item.category === "workout" ? (
+        <Text style={styles.safetyNote}>{item.safetyNote || PAIN_LINE}</Text>
+      ) : null}
       {(item.steps || []).map((step) => (
         <Pressable key={step.key} style={styles.stepRow} onPress={() => onStepPress(step)}>
           <View style={[styles.dot, step.done && styles.dotDone]}>
@@ -273,6 +313,11 @@ const ItemCard = memo(function ItemCard({
           <Pressable style={styles.btnSkip} onPress={() => dispatch(skipItem(item._id))}>
             <Text style={styles.btnSkipText}>Skip</Text>
           </Pressable>
+          {onLogWorkout ? (
+            <Pressable style={styles.btnSkip} onPress={onLogWorkout}>
+              <Text style={styles.btnSkipText}>Log</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : item.status === "pending" ? null : (
         <View style={styles.row}>
@@ -422,6 +467,7 @@ function createStyles(colors) {
     dotDone: { backgroundColor: colors.success, borderColor: colors.success },
     dotCheck: { color: colors.bg, fontSize: 9, fontWeight: "700" },
     step: { color: colors.muted, fontSize: 13, flex: 1, lineHeight: 18 },
+    safetyNote: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 8 },
     stepDone: { color: colors.muted2, textDecorationLine: "line-through" },
 
     row: { flexDirection: "row", gap: 8, marginTop: 13, alignItems: "center", justifyContent: "space-between" },

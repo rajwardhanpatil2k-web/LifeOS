@@ -7,11 +7,24 @@ const cors = require("cors");
 const { connectDb } = require("./db");
 const { registerRoutes } = require("./routes");
 const { seed } = require("./seed/run");
+const { requireAuth } = require("./auth/middleware");
+const { registerAuthRoutes, ensureAuthAccount } = require("./auth/login");
+const { allowOrigin } = require("./privacy");
 
 const app = express();
 app.set("trust proxy", 1);
-app.use(cors());
-app.use(express.json());
+const webOrigin = String(process.env.LIFEOS_WEB_ORIGIN || "").trim();
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (allowOrigin(origin, webOrigin)) return callback(null, true);
+      return callback(null, false);
+    },
+  })
+);
+app.use(express.json({ limit: "1mb" }));
+app.use(requireAuth);
+registerAuthRoutes(app);
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -33,6 +46,7 @@ async function start() {
     if (!existing || process.env.SEED_ON_START === "true") {
       await seed({ disconnect: false });
     }
+    await ensureAuthAccount();
   } catch (err) {
     console.warn("Seed warning:", err.message);
   }

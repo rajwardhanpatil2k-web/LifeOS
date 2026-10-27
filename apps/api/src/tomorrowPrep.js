@@ -3,7 +3,16 @@ const { seasonalFruitsForMonth } = require("./seed/rajRoutine");
 
 const PREP_KEY = "tomorrow-prep";
 const DEFAULT_PREP_TIME = "20:00";
-const FOOD_KEYS = new Set(["breakfast", "seasonal-fruit", "seeds-dryfruits", "dinner", "office"]);
+const FOOD_KEYS = new Set([
+  "breakfast",
+  "seasonal-fruit",
+  "seeds-dryfruits",
+  "dinner",
+  "office",
+  "lunch",
+  "fruit",
+  "seed-blend",
+]);
 
 function weekdayFromDate(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -46,6 +55,12 @@ function foodLines(items) {
       for (const step of item.steps || []) {
         if (step.label) lines.push({ key: step.key, label: step.label });
       }
+    } else if (item.key === "lunch") {
+      lines.push({ key: "lunch", label: "Lunch: roti or rice, dal, sabzi, and curd." });
+    } else if (item.key === "seed-blend") {
+      lines.push({ key: "seed-blend", label: "Sunflower-sesame seed blend with lunch." });
+    } else if (item.key === "fruit") {
+      lines.push({ key: "fruit", label: "Fruit: apple, papaya, or whatever is in season, plus roasted pumpkin seeds." });
     } else if (item.key === "dinner") {
       lines.push({ key: "dinner", label: "Dinner: protein, vegetables, and moderate carbs." });
     } else if (item.key === "office") {
@@ -120,7 +135,9 @@ async function mergeTomorrowPrep(user, plan) {
     dirty = true;
   }
   if (existing.status === "pending") {
-    if (existing.scheduledAt !== next.scheduledAt) {
+    const keptTemplateClock =
+      existing.plannedAt && existing.plannedAt === existing.scheduledAt && existing.scheduledAt !== next.scheduledAt;
+    if (!keptTemplateClock && existing.scheduledAt !== next.scheduledAt) {
       existing.scheduledAt = next.scheduledAt;
       dirty = true;
     }
