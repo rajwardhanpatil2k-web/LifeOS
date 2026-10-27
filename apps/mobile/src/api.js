@@ -1,5 +1,5 @@
 import { getApiUrl, setApiUrl } from "./apiConfig";
-import { serverUrlProblem } from "./serverUrl";
+import { normalizeServerUrl, serverUrlProblem } from "./serverUrl";
 
 const RETRY_MS = [2500, 6000, 10000];
 // Render's free tier can take ~30-50s to wake; one attempt gets this long.
@@ -31,6 +31,11 @@ function parseBody(text, contentType) {
     (contentType && contentType.includes("application/json"));
   if (!looksJson) {
     if (trimmed.startsWith("<")) {
+      if (/Cannot POST \/api\/auth\/login/i.test(trimmed)) {
+        throw new Error(
+          "This server does not have sign-in yet. Deploy the latest Life OS API on Render and set LIFEOS_LOGIN_USER and LIFEOS_LOGIN_PASSWORD there."
+        );
+      }
       throw new Error(
         `Server returned a web page, not Life OS JSON. Check Settings → Server URL (currently ${getApiUrl()}).`
       );
@@ -62,7 +67,7 @@ export function apiUrl() {
 export const API_URL = getApiUrl();
 
 export async function testApiConnection(url) {
-  const base = String(url || getApiUrl()).trim().replace(/\/$/, "");
+  const base = normalizeServerUrl(url || getApiUrl());
   const problem = serverUrlProblem(base, { release: typeof __DEV__ !== "undefined" && __DEV__ === false });
   if (problem) throw new Error(problem);
   const res = await fetch(`${base}/health`);
@@ -71,6 +76,21 @@ export async function testApiConnection(url) {
   if (!res.ok) throw new Error(data?.error || `Health check failed (${res.status}).`);
   if (!data || data.service !== "life-os-api") {
     throw new Error("That URL is not your Life OS API. Use the Render URL from your dashboard.");
+  }
+  const loginProbe = await fetch(`${base}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const loginText = await loginProbe.text();
+  if (
+    loginProbe.status === 404 ||
+    (loginText.trim().startsWith("<") && /Cannot POST/i.test(loginText)) ||
+    data.auth === false
+  ) {
+    throw new Error(
+      "This server is missing sign-in. Deploy the latest Life OS API on Render, then set LIFEOS_LOGIN_USER and LIFEOS_LOGIN_PASSWORD (8+ characters) in the service environment."
+    );
   }
   setApiUrl(base);
   return data;

@@ -1,5 +1,17 @@
+export function normalizeServerUrl(url) {
+  const trimmed = String(url || "").trim().replace(/\/$/, "");
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_err) {
+    return trimmed;
+  }
+}
+
 export function serverUrlProblem(url, { release = false } = {}) {
-  const next = String(url || "").trim();
+  const next = normalizeServerUrl(url);
   if (!next) return "Enter a server URL first.";
   let parsed;
   try {

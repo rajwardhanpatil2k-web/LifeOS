@@ -373,7 +373,7 @@ function registerRoutes(app) {
   const { openShiftPreview, confirmShift, undoShiftOp } = require("./shifts");
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "life-os-api" });
+    res.json({ ok: true, service: "life-os-api", auth: true });
   });
 
   app.post("/api/shifts/preview", wrap(async (req, res) => {

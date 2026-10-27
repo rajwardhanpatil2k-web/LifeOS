@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { serverUrlProblem } from "./serverUrl.js";
+import { normalizeServerUrl, serverUrlProblem } from "./serverUrl.js";
+
+test("server hostnames are normalized to lowercase", () => {
+  assert.equal(normalizeServerUrl("https://lifeOS-1vvx.onrender.com/"), "https://lifeos-1vvx.onrender.com");
+});
 
 test("a release build rejects a plain http server", () => {
   assert.equal(serverUrlProblem("http://10.0.2.2:4000", { release: true }).includes("https://"), true);

@@ -1,6 +1,6 @@
 import { NativeModules, Platform } from "react-native";
 import PRODUCTION_API_URL from "./productionApiUrl";
-import { serverUrlProblem } from "./serverUrl";
+import { normalizeServerUrl, serverUrlProblem } from "./serverUrl";
 
 const { WakeAlarmModule } = NativeModules;
 const PREF_KEY = "apiUrl";
@@ -8,7 +8,7 @@ const DEFAULT_DEV_HOST =
   Platform.OS === "android" ? "http://10.0.2.2:4000" : "http://127.0.0.1:4000";
 
 function trimUrl(value) {
-  return String(value || "").trim().replace(/\/$/, "");
+  return normalizeServerUrl(value);
 }
 
 function bakedUrl() {
