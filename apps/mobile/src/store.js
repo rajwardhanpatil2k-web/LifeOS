@@ -311,6 +311,11 @@ function applyItemUpdate(state, action) {
   );
 }
 
+function applyItemUpdateClearingAction(state, action) {
+  state.itemActionId = null;
+  applyItemUpdate(state, action);
+}
+
 function applyOptimisticFromItem(state, updatedItem) {
   if (!state.data || !updatedItem) return;
   applyItemUpdate(state, { payload: buildOptimisticPayload(state.data, updatedItem) });
@@ -451,25 +456,13 @@ const todaySlice = createSlice({
         const item = (state.data?.items || []).find((row) => String(row._id) === String(itemId));
         if (item && stepKey) applyOptimisticFromItem(state, optimisticToggleStep(item, stepKey));
       })
-      .addCase(completeItem.fulfilled, (state) => {
-        state.itemActionId = null;
-      })
       .addCase(completeItem.rejected, (state) => {
-        state.itemActionId = null;
-      })
-      .addCase(skipItem.fulfilled, (state) => {
         state.itemActionId = null;
       })
       .addCase(skipItem.rejected, (state) => {
         state.itemActionId = null;
       })
-      .addCase(undoItem.fulfilled, (state) => {
-        state.itemActionId = null;
-      })
       .addCase(undoItem.rejected, (state) => {
-        state.itemActionId = null;
-      })
-      .addCase(toggleStep.fulfilled, (state) => {
         state.itemActionId = null;
       })
       .addCase(toggleStep.rejected, (state) => {
@@ -483,13 +476,13 @@ const todaySlice = createSlice({
       .addCase(fetchWeek.fulfilled, (state, action) => {
         state.week = action.payload;
       })
-      .addCase(completeItem.fulfilled, applyItemUpdate)
+      .addCase(completeItem.fulfilled, applyItemUpdateClearingAction)
       .addCase(markItemReady.fulfilled, applyItemUpdate)
       .addCase(snoozeItem.fulfilled, applyItemUpdate)
       .addCase(remindLaterItem.fulfilled, applyItemUpdate)
-      .addCase(skipItem.fulfilled, applyItemUpdate)
-      .addCase(undoItem.fulfilled, applyItemUpdate)
-      .addCase(toggleStep.fulfilled, applyItemUpdate)
+      .addCase(skipItem.fulfilled, applyItemUpdateClearingAction)
+      .addCase(undoItem.fulfilled, applyItemUpdateClearingAction)
+      .addCase(toggleStep.fulfilled, applyItemUpdateClearingAction)
       .addCase(reorderItems.fulfilled, (state, action) => {
         if (!state.data) return;
         state.data.items = action.payload.items;
