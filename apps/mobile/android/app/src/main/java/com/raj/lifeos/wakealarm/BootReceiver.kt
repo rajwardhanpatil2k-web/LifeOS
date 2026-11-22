@@ -18,9 +18,12 @@ class BootReceiver : BroadcastReceiver() {
       action == Intent.ACTION_TIMEZONE_CHANGED ||
       action == "android.intent.action.QUICKBOOT_POWERON"
     if (!restore) return
-    AlarmScheduler.restoreAfterBoot(context)
-    VoiceAgentScheduler.restore(context)
-    TaskReminderScheduler.restore(context)
-    AppLimitMonitorService.sync(context)
+    try {
+      AlarmScheduler.restoreAfterBoot(context)
+      VoiceAgentScheduler.restore(context)
+      TaskReminderScheduler.restore(context)
+      AppLimitMonitorService.sync(context)
+    } catch (_: Exception) {
+    }
   }
 }

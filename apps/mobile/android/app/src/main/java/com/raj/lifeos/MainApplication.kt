@@ -15,6 +15,7 @@ import com.facebook.soloader.SoLoader
 
 import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
+import expo.modules.devlauncher.DevLauncherController
 
 import com.raj.lifeos.wakealarm.WakeAlarmPackage
 import com.raj.lifeos.applimit.AppLimitMonitorService
@@ -46,6 +47,12 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
+  // Release builds still ship expo-dev-client stubs; initialize so nothing
+  // touches DevLauncherController.instance before the module is set up.
+    try {
+      DevLauncherController.initialize(this)
+    } catch (_: Exception) {
+    }
     SoLoader.init(this, OpenSourceMergedSoMapping)
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
       // If you opted-in for the New Architecture, we load the native entry point for this app.
