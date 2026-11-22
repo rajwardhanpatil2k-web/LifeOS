@@ -47,8 +47,8 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
-  // Release builds still ship expo-dev-client stubs; initialize so nothing
-  // touches DevLauncherController.instance before the module is set up.
+    // Release builds still ship expo-dev-client stubs; initialize so nothing
+    // touches DevLauncherController.instance before the module is set up.
     try {
       DevLauncherController.initialize(this)
     } catch (_: Exception) {
