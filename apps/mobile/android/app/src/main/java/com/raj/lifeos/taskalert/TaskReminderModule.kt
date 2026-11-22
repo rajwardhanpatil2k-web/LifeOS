@@ -23,6 +23,10 @@ import java.util.LinkedHashSet
 import java.util.Locale
 
 class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
+  init {
+    TaskCallEvents.reactContext = reactContext
+  }
+
   private val mainHandler = Handler(Looper.getMainLooper())
   private var recognizer: SpeechRecognizer? = null
   private var listening = false
@@ -139,19 +143,94 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
     durationMin: Double,
     domain: String,
     delayMs: Double,
+    shiftNeighbors: Boolean,
     promise: Promise
   ) {
     try {
+      TaskCallState.clearRingAttempts(reactApplicationContext, id, phase)
+      TaskCallState.clearBurst(reactApplicationContext, id, phase)
+      TaskCallState.clearSilentFailures(reactApplicationContext, id, phase)
       TaskReminderScheduler.snooze(
         reactApplicationContext,
         TaskReminderScheduler.Reminder(
           id, title, spokenText, alertLevel, 0L, phase, durationMin.toInt(), domain
         ),
-        delayMs.toLong()
+        delayMs.toLong(),
+        shiftNeighbors
       )
       promise.resolve(true)
     } catch (e: Exception) {
       promise.reject("TASK_REMINDER_SNOOZE_FAILED", e)
+    }
+  }
+
+  @ReactMethod
+  fun peekPendingAutoSkips(promise: Promise) {
+    try {
+      promise.resolve(TaskCallEvents.peekPendingAutoSkips(reactApplicationContext))
+    } catch (e: Exception) {
+      promise.reject("TASK_CALL_AUTO_SKIP", e)
+    }
+  }
+
+  @ReactMethod
+  fun ackAutoSkip(itemId: String, promise: Promise) {
+    try {
+      TaskCallEvents.ackAutoSkip(reactApplicationContext, itemId)
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("TASK_CALL_AUTO_SKIP", e)
+    }
+  }
+
+  @ReactMethod
+  fun noteUnanswered(
+    id: String,
+    title: String,
+    spokenText: String,
+    alertLevel: String,
+    phase: String,
+    durationMin: Double,
+    domain: String,
+    promise: Promise
+  ) {
+    try {
+      val reminder = TaskReminderScheduler.Reminder(
+        id,
+        title.ifBlank { "Task" },
+        spokenText,
+        alertLevel,
+        0L,
+        phase.ifBlank { TaskCallState.PHASE_START },
+        durationMin.toInt(),
+        domain
+      )
+      val claimed = TaskCallDirector.unanswered(reactApplicationContext, reminder, true)
+      if (claimed) TaskAlertService.stop(reactApplicationContext)
+      promise.resolve(claimed)
+    } catch (e: Exception) {
+      promise.reject("TASK_CALL_UNANSWERED", e)
+    }
+  }
+
+  @ReactMethod
+  fun getEndGaveUpIds(promise: Promise) {
+    try {
+      val ids = Arguments.createArray()
+      for (id in TaskCallState.endGaveUpIds(reactApplicationContext)) ids.pushString(id)
+      promise.resolve(ids)
+    } catch (e: Exception) {
+      promise.reject("TASK_CALL_GAVE_UP", e)
+    }
+  }
+
+  @ReactMethod
+  fun clearEndGaveUp(id: String, promise: Promise) {
+    try {
+      TaskCallState.clearEndGaveUp(reactApplicationContext, id)
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("TASK_CALL_GAVE_UP", e)
     }
   }
 
@@ -219,6 +298,7 @@ class TaskReminderModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun setCallUiVisible(visible: Boolean, promise: Promise) {
     try {
+      TaskCallState.setUiVisible(reactApplicationContext, visible)
       if (visible && TaskCallState.ringing) {
         TaskAlertService.showNotification(reactApplicationContext)
       }

@@ -16,6 +16,9 @@
     "demo:backfill": "npm run demo:backfill --workspace=apps/api",
     "demo:clear": "npm run demo:clear --workspace=apps/api",
     "monitor": "node scripts/monitor.js",
+    "android:emulator:setup": "bash scripts/ensure-android-emulator.sh",
+    "dev:emulator": "bash scripts/dev-emulator.sh",
+    "dev:ios": "bash scripts/dev-ios-simulator.sh",
     "docker:up": "docker compose up -d mongo",
     "android:release": "bash scripts/build-android-release.sh",
     "android:debug": "bash scripts/build-android-debug.sh"

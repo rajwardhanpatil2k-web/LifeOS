@@ -21,6 +21,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
+import com.raj.lifeos.PhoneCalls
 import com.raj.lifeos.R
 
 // Foreground service so the ringing (and the process) survives Doze and an
@@ -32,6 +33,7 @@ class AlarmRingingService : Service() {
     const val CHANNEL_ID = "lifeos-wake-alarm"
     const val NOTIFICATION_ID = 4202
     const val ACTION_STOP = "com.raj.lifeos.wakealarm.STOP"
+    const val ACTION_WAIT_FOR_CALL = "com.raj.lifeos.wakealarm.WAIT_FOR_CALL"
 
     @Volatile
     private var ringingFlag = false
@@ -62,6 +64,10 @@ class AlarmRingingService : Service() {
       } catch (_: Exception) {
         false
       }
+      if (PhoneCalls.active(this@AlarmRingingService)) {
+        silenceForCall()
+        return
+      }
       if (!playing) startRingtone()
       handler.postDelayed(this, 1500L)
     }
@@ -74,8 +80,49 @@ class AlarmRingingService : Service() {
       stopRinging()
       return START_NOT_STICKY
     }
+    if (intent?.action == ACTION_WAIT_FOR_CALL || PhoneCalls.active(this)) {
+      waitForCallToEnd()
+      return START_STICKY
+    }
     startRinging()
     return START_STICKY
+  }
+
+  private fun waitForCallToEnd() {
+    if (stopping) return
+    createChannel()
+    try {
+      val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        .setContentTitle("Wake alarm")
+        .setContentText("It will ring after your call ends.")
+        .setSmallIcon(R.drawable.ic_stat_lifeos)
+        .setSilent(true)
+        .setOngoing(true)
+        .build()
+      if (Build.VERSION.SDK_INT >= 34) {
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+    } catch (_: Exception) {
+    }
+    handler.postDelayed({
+      if (stopping) return@postDelayed
+      if (PhoneCalls.active(this)) {
+        waitForCallToEnd()
+      } else {
+        startRinging()
+        AlarmScheduler.launchWakeScreen(this)
+      }
+    }, 5_000L)
+  }
+
+  private fun silenceForCall() {
+    try { ringtone?.stop() } catch (_: Exception) {}
+    ringtone = null
+    try { vibrator?.cancel() } catch (_: Exception) {}
+    ringingFlag = false
+    waitForCallToEnd()
   }
 
   private fun startRinging() {

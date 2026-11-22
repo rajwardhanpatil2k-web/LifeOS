@@ -22,12 +22,14 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
+import com.raj.lifeos.PhoneCalls
 import com.raj.lifeos.R
 import com.raj.lifeos.wakealarm.AlarmRingingService
 
-// Incoming task call: looping ringtone + vibration until the user answers,
-// rejects, or the unanswered timeout snoozes it. TTS happens after Answer
-// from the JS/native module so the ring is never cut off by speech.
+// Incoming task call: looping ringtone + vibration until the user answers or
+// rejects. Each burst rings ~20s; up to three bursts, then JS marks skipped.
+// TTS happens after Answer from the JS/native module so the ring is never cut
+// off by speech.
 class TaskAlertService : Service() {
   companion object {
     const val CHANNEL_ID = "lifeos-task-call"
@@ -36,7 +38,9 @@ class TaskAlertService : Service() {
     const val ACTION_SILENCE = "com.raj.lifeos.taskalert.SILENCE"
     const val ACTION_HIDE_NOTIFICATION = "com.raj.lifeos.taskalert.HIDE_NOTIFICATION"
     const val ACTION_SHOW_NOTIFICATION = "com.raj.lifeos.taskalert.SHOW_NOTIFICATION"
-    const val UNANSWERED_MS = 60_000L
+    const val UNANSWERED_MS = 20_000L
+    const val MAX_RING_ATTEMPTS = 3
+    const val RING_RETRY_GAP_MS = 4_000L
 
     fun stop(context: Context) {
       sendAction(context, ACTION_STOP)
@@ -78,6 +82,8 @@ class TaskAlertService : Service() {
   private var unansweredRunnable: Runnable? = null
   private var ringtoneWatch: Runnable? = null
   private var finished = false
+  private var cleanFinish = false
+  private var ringCommitted = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -110,6 +116,7 @@ class TaskAlertService : Service() {
       } catch (_: Exception) {
       }
       dismissCallNotification()
+      ringCommitted = false
       stopSelf()
       return START_NOT_STICKY
     }
@@ -150,6 +157,19 @@ class TaskAlertService : Service() {
       return START_NOT_STICKY
     }
 
+    if (PhoneCalls.active(this)) {
+      val parked = reminderFrom(intent)
+      if (parked.id.isNotBlank()) TaskReminderScheduler.snooze(this, parked, 20_000L)
+      ringCommitted = false
+      stopSelf()
+      return START_NOT_STICKY
+    }
+
+    finished = false
+    cleanFinish = false
+    ringCommitted = true
+    TaskCallState.beginBurst(this, itemId, phase)
+    TaskReminderScheduler.cancelPendingBurst(this, itemId, phase)
     TaskCallState.ringing = true
     TaskCallState.inSession = false
     TaskCallState.setActive(
@@ -193,6 +213,21 @@ class TaskAlertService : Service() {
 
   private fun startRingtone() {
     if (finished || !TaskCallState.ringing) return
+    if (PhoneCalls.active(this)) {
+      val parked = TaskReminderScheduler.Reminder(
+        id = itemId,
+        title = title,
+        spokenText = spokenText,
+        alertLevel = alertLevel,
+        at = System.currentTimeMillis(),
+        phase = phase,
+        durationMin = durationMin,
+        domain = domain
+      )
+      TaskReminderScheduler.snooze(this, parked, 20_000L)
+      finishAlert(clearState = true, parkQueue = false)
+      return
+    }
     if (isPlayerPlaying()) {
       armRingtoneWatch()
       return
@@ -228,6 +263,7 @@ class TaskAlertService : Service() {
       mp.prepare()
       mp.start()
       player = mp
+      TaskCallState.markAlerted(this, itemId, phase)
     } catch (_: Exception) {
       player = null
     }
@@ -239,7 +275,10 @@ class TaskAlertService : Service() {
     ringtoneWatch = Runnable {
       if (finished || !TaskCallState.ringing) return@Runnable
       if (!isPlayerPlaying()) startRingtone()
-      else handler.postDelayed(ringtoneWatch!!, 1200L)
+      else {
+        TaskCallState.markAlerted(this, itemId, phase)
+        handler.postDelayed(ringtoneWatch!!, 1200L)
+      }
     }
     handler.postDelayed(ringtoneWatch!!, 1200L)
   }
@@ -267,33 +306,36 @@ class TaskAlertService : Service() {
         @Suppress("DEPRECATION")
         vibrator?.vibrate(pattern, 0)
       }
+      if (vibrator?.hasVibrator() == true) TaskCallState.markAlerted(this, itemId, phase)
     } catch (_: Exception) {
     }
   }
 
   private fun scheduleUnansweredTimeout() {
     unansweredRunnable?.let { handler.removeCallbacks(it) }
-    unansweredRunnable = Runnable { autoSnooze() }
+    unansweredRunnable = Runnable { onUnansweredRing() }
     handler.postDelayed(unansweredRunnable!!, UNANSWERED_MS)
   }
 
-  private fun autoSnooze() {
+  private fun currentReminder() = TaskReminderScheduler.Reminder(
+    itemId,
+    title.ifBlank { "Task" },
+    spokenText,
+    alertLevel,
+    System.currentTimeMillis(),
+    phase,
+    durationMin,
+    domain
+  )
+
+  private fun onUnansweredRing() {
     if (finished) return
-    if (itemId.isNotBlank()) {
-      val delay = if (phase == TaskCallState.PHASE_END) {
-        TaskReminderScheduler.END_FOLLOWUP_MS
-      } else {
-        TaskReminderScheduler.START_SNOOZE_MS
-      }
-      TaskReminderScheduler.snooze(
-        this,
-        TaskReminderScheduler.Reminder(
-          itemId, title, spokenText, alertLevel, 0L, phase, durationMin, domain
-        ),
-        delay
-      )
+    if (itemId.isBlank()) {
+      finishAlert(clearState = true, parkQueue = true)
+      return
     }
-    finishAlert(clearState = true, parkQueue = true)
+    TaskCallDirector.unanswered(this, currentReminder(), TaskCallState.wasAlerted(this, itemId, phase))
+    finishAlert(clearState = true, parkQueue = false)
   }
 
   private fun restoreFromState() {
@@ -310,6 +352,12 @@ class TaskAlertService : Service() {
   private fun silenceAudio() {
     unansweredRunnable?.let { handler.removeCallbacks(it) }
     unansweredRunnable = null
+    ringCommitted = false
+    if (itemId.isNotBlank()) {
+      TaskCallState.clearRingAttempts(this, itemId, phase)
+      TaskCallState.clearBurst(this, itemId, phase)
+      TaskCallState.clearSilentFailures(this, itemId, phase)
+    }
     TaskCallState.ringing = false
     TaskCallState.inSession = true
     stopRingtoneOnly()
@@ -319,6 +367,8 @@ class TaskAlertService : Service() {
 
   private fun finishAlert(clearState: Boolean, parkQueue: Boolean = false) {
     if (finished) return
+    cleanFinish = true
+    ringCommitted = false
     finished = true
     handler.removeCallbacksAndMessages(null)
     stopRingtoneOnly()
@@ -458,6 +508,11 @@ class TaskAlertService : Service() {
   }
 
   override fun onDestroy() {
+    val snapshot = if (ringCommitted && !cleanFinish && itemId.isNotBlank()) currentReminder() else null
+    if (snapshot != null) {
+      TaskCallState.clearBurst(this, itemId, phase)
+      TaskCallState.ringing = false
+    }
     ringtoneWatch?.let { handler.removeCallbacks(it) }
     try { player?.stop() } catch (_: Exception) {}
     try { player?.release() } catch (_: Exception) {}
@@ -468,6 +523,14 @@ class TaskAlertService : Service() {
       wakeLock?.let { if (it.isHeld) it.release() }
     } catch (_: Exception) {}
     wakeLock = null
+    if (snapshot != null) {
+      TaskReminderScheduler.armExact(
+        applicationContext,
+        snapshot,
+        System.currentTimeMillis() + RING_RETRY_GAP_MS,
+        "burst"
+      )
+    }
     super.onDestroy()
   }
 }

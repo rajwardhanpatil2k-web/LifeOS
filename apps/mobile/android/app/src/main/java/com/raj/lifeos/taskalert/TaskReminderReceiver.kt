@@ -18,8 +18,21 @@ class TaskReminderReceiver : BroadcastReceiver() {
         at = 0L,
         phase = intent.getStringExtra(TaskCallIntents.EXTRA_PHASE) ?: TaskCallState.PHASE_START,
         durationMin = intent.getIntExtra(TaskCallIntents.EXTRA_DURATION, 0),
-        domain = intent.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty()
+        domain = intent.getStringExtra(TaskCallIntents.EXTRA_DOMAIN).orEmpty(),
+        kind = intent.getStringExtra(TaskCallIntents.EXTRA_KIND).orEmpty()
       )
+
+      if (reminder.kind == "deadline") {
+        if (reminder.id.isNotBlank()) {
+          TaskReminderScheduler.consume(context, reminder.id, reminder.phase)
+          TaskCallDirector.unanswered(
+            context,
+            reminder,
+            TaskCallState.wasAlerted(context, reminder.id, reminder.phase)
+          )
+        }
+        return
+      }
 
       if (AlarmRingingService.isRinging() || TaskCallState.busy()) {
         TaskCallQueue.enqueue(context, reminder)
@@ -41,17 +54,41 @@ class TaskReminderReceiver : BroadcastReceiver() {
 
       val service = Intent(context, TaskAlertService::class.java)
       TaskCallIntents.copyExtras(intent, service)
+      var started = false
       try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
           context.startForegroundService(service)
         } else {
           context.startService(service)
         }
+        started = true
       } catch (_: Exception) {
         try {
           context.startService(service)
+          started = true
         } catch (_: Exception) {
         }
+      }
+      if (!started && reminder.id.isNotBlank()) {
+        TaskCallState.setActive(
+          context,
+          TaskCallState.ActiveCall(
+            reminder.id,
+            reminder.title,
+            reminder.spokenText,
+            reminder.alertLevel,
+            reminder.phase,
+            reminder.durationMin,
+            reminder.domain
+          )
+        )
+        TaskCallState.beginBurst(context, reminder.id, reminder.phase)
+        TaskReminderScheduler.armExact(
+          context,
+          reminder,
+          System.currentTimeMillis() + TaskAlertService.UNANSWERED_MS + 2_000L,
+          "deadline"
+        )
       }
       // Same second-chance as the wake alarm: some OEMs skip FGS / full-screen
       // intents while the app has been unused, but still allow an activity start

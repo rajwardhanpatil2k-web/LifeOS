@@ -26,6 +26,30 @@ test("horizon arms three days and drops future info lines", () => {
   );
 });
 
+test("a task marked done or skipped on today is not armed", () => {
+  const horizon = {
+    today: "2026-10-20",
+    days: [
+      {
+        date: "2026-10-20",
+        items: [
+          { _id: "gym", key: "gym", status: "pending" },
+          { _id: "lunch", key: "lunch", status: "pending" },
+        ],
+      },
+    ],
+  };
+  const armed = itemsToArm(
+    horizon,
+    [
+      { _id: "gym", key: "gym", status: "skipped" },
+      { _id: "lunch", key: "lunch", status: "done" },
+    ],
+    "2026-10-20"
+  );
+  assert.deepEqual(armed, []);
+});
+
 test("without a horizon the current day is still armed", () => {
   const armed = itemsToArm(null, [{ key: "lunch" }], "2026-10-20");
   assert.equal(armed[0].planDate, "2026-10-20");

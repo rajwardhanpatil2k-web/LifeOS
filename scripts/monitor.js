@@ -110,7 +110,8 @@ async function main() {
       }
       if (lan) break;
     }
-    console.log("Mobile (simulator): npm run dev:mobile");
+    console.log("Mobile (Android emulator): npm run dev:emulator  (once: npm run android:emulator:setup)");
+    console.log("Mobile (Metro only): npm run dev:mobile");
     if (lan) {
       console.log(`Mobile (phone on Wi-Fi): npm run dev:phone  → API http://${lan}:4000`);
     } else {

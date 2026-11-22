@@ -14,6 +14,7 @@ object TaskCallIntents {
   const val EXTRA_PHASE = "phase"
   const val EXTRA_DURATION = "durationMin"
   const val EXTRA_DOMAIN = "domain"
+  const val EXTRA_KIND = "kind"
 
   fun uri(
     id: String,

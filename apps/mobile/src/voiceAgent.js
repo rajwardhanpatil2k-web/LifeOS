@@ -222,11 +222,12 @@ function isPromptEcho(spoken, prompt) {
 }
 
 function meaningFromHeard(spoken, phase) {
+  if (/\bskip\b/.test(spoken) && !/\b(dont|do not)\b/.test(spoken)) return "skip";
   if (interpretDeferMinutes(spoken)) return phase === "end" || phase === "complete" ? "remind" : "snooze";
 
   const isEnd = phase === "end" || phase === "complete";
   if (isEnd) {
-    if (/\b(not done|not yet|havent|have not|didnt|did not|remind me|later|incomplete|skip|wait)\b/.test(spoken)) {
+    if (/\b(not done|not yet|havent|have not|didnt|did not|remind me|later|incomplete|wait)\b/.test(spoken)) {
       return "remind";
     }
     if (/\b(no|nope)\b/.test(spoken) && !/\bnow\b/.test(spoken)) return "remind";

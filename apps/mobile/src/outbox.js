@@ -55,12 +55,18 @@ export async function drainOutbox() {
 }
 
 export async function postOrQueue({ path, body, optimistic }) {
+  // Done / skip must update the screen before Render wakes up. Waiting on the
+  // request left the buttons dead for half a minute and left the alarm armed.
+  if (optimistic) {
+    await enqueue({ path, body, clientId: body.clientId });
+    drainOutbox().catch(() => {});
+    return { ...optimistic, queued: true };
+  }
   try {
     return await api(path, { method: "POST", body: JSON.stringify(body) });
   } catch (err) {
     if (!isNetworkError(err)) throw err;
     await enqueue({ path, body, clientId: body.clientId });
-    if (!optimistic) throw err;
-    return { ...optimistic, queued: true };
+    throw err;
   }
 }

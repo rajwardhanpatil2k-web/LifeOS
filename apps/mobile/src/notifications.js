@@ -1,6 +1,6 @@
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
-import { durationOf } from "./taskCallConfig";
+import { explicitDurationMin } from "./taskCallConfig";
 import { formatClock12 } from "./formatTime";
 import { planTaskCalls } from "./taskCallPlanner";
 
@@ -146,7 +146,9 @@ export async function syncTodayReminders(items, { name = "Raj", pausedUntil = 0 
           title: `${TITLE_PREFIX[level]}${item.title}`,
           body:
             reminder.phase === "end"
-              ? `Time's up · ${durationOf(item)} min`
+              ? explicitDurationMin(item)
+                ? `Time's up · ${explicitDurationMin(item)} min`
+                : "Time's up"
               : `${formatClock12(item.scheduledAt)} · incoming task call`,
           data: {
             kind: "task_call",
@@ -155,7 +157,7 @@ export async function syncTodayReminders(items, { name = "Raj", pausedUntil = 0 
             title: item.title,
             domain: item.domain,
             alertLevel: level,
-            durationMin: durationOf(item),
+            durationMin: explicitDurationMin(item),
             spokenText: reminder.spokenText,
           },
           sound: null,

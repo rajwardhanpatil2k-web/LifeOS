@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.raj.lifeos.voice.VoiceAgentScheduler
 import com.raj.lifeos.taskalert.TaskReminderScheduler
+import com.raj.lifeos.applimit.AppLimitMonitorService
 
 // AlarmManager entries are wiped on reboot; this restores the wake alarm
 // and any still-future spoken task cues.
@@ -20,5 +21,6 @@ class BootReceiver : BroadcastReceiver() {
     AlarmScheduler.restoreAfterBoot(context)
     VoiceAgentScheduler.restore(context)
     TaskReminderScheduler.restore(context)
+    AppLimitMonitorService.sync(context)
   }
 }

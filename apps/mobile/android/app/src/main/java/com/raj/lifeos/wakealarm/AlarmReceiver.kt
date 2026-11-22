@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.raj.lifeos.PhoneCalls
 
 class AlarmReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
@@ -12,6 +13,8 @@ class AlarmReceiver : BroadcastReceiver() {
       AlarmScheduler.rescheduleFromReceiver(context)
 
       val serviceIntent = Intent(context, AlarmRingingService::class.java)
+      val onCall = PhoneCalls.active(context)
+      if (onCall) serviceIntent.action = AlarmRingingService.ACTION_WAIT_FOR_CALL
       try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
           context.startForegroundService(serviceIntent)
@@ -27,7 +30,7 @@ class AlarmReceiver : BroadcastReceiver() {
 
       // Sound lives in the service. The scanner is a separate activity launch
       // — full-screen notification intents are skipped when the screen is on.
-      AlarmScheduler.launchWakeScreen(context)
+      if (!onCall) AlarmScheduler.launchWakeScreen(context)
     } finally {
       pending.finish()
     }

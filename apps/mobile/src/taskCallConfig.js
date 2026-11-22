@@ -4,7 +4,9 @@ export const TASK_CALL_URI_PREFIX = "lifeos://task-call";
 export const START_SNOOZE_MIN = 5;
 export const END_FOLLOWUP_MIN = 15;
 export const DEFAULT_DURATION_MIN = 15;
-export const UNANSWERED_RING_MS = 60_000;
+export const UNANSWERED_RING_MS = 20_000;
+export const MAX_RING_ATTEMPTS = 3;
+export const RING_RETRY_GAP_MS = 4_000;
 // Never ring two task calls inside this window — overdue catch-up stays slot-by-slot.
 export const CALL_GAP_MS = 5 * 60 * 1000;
 // After hanging up, wait this long before the next overdue start-call.
@@ -23,6 +25,20 @@ export const AI_MUTE_GRACE_MS = 45 * 1000;
 export function durationOf(item) {
   const n = Number(item?.durationMin);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_DURATION_MIN;
+}
+
+// A task with no duration does not get an end call. The 15-minute default is
+// only for samples and voice cues that need a spoken length.
+export function explicitDurationMin(item) {
+  const n = Number(item?.durationMin);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+export function snoozeDelayMs(phase, overrideMinutes) {
+  const fallback = phase === "end" ? END_FOLLOWUP_MIN : START_SNOOZE_MIN;
+  const requested = Number(overrideMinutes);
+  const minutes = Number.isFinite(requested) && requested > 0 ? requested : fallback;
+  return Math.round(minutes * 60 * 1000);
 }
 
 export function startMillis(scheduledAt, now = new Date(), planDate) {

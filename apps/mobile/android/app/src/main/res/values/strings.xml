@@ -1,3 +1,4 @@
 <resources>
   <string name="app_name">Life OS</string>
+  <string name="app_limit_accessibility_desc">Sees which app you opened, shows the time you have left, and blocks that app when today\'s time is used up. It uses the app name only.</string>
 </resources>

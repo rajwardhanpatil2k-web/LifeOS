@@ -3,11 +3,24 @@ import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import { useDispatch, useSelector } from "react-redux";
 import { expireAiMute, fetchSettings, fetchToday } from "../store";
+import { hydrateAppLimits } from "../appLimitSlice";
 import { loadApiUrl } from "../apiConfig";
 import { isWakeAlarmAvailable, isWakeAlarmRinging, scheduleDailyWakeAlarm, wasWakeAlarmJustDismissed } from "../wakeAlarm";
 import { shouldCancelWakeAlarm } from "../alarmAccess";
 import { isVoiceAgentAvailable, cancelVoiceCues, speakNow } from "../voiceAgent";
-import { isTaskAlertsAvailable, getActiveTaskCall, isTaskCallRinging, stopTaskAlert, setTaskAlertsPausedUntil } from "../taskAlerts";
+import {
+  isTaskAlertsAvailable,
+  getActiveTaskCall,
+  isTaskCallRinging,
+  stopTaskAlert,
+  setTaskAlertsPausedUntil,
+  subscribeTaskCallAutoSkip,
+  subscribeTaskCallDismiss,
+  peekPendingTaskCallAutoSkips,
+  ackTaskCallAutoSkip,
+} from "../taskAlerts";
+import { remindLaterItem, skipItem, snoozeItem } from "../store";
+import { END_FOLLOWUP_MIN, START_SNOOZE_MIN } from "../taskCallConfig";
 import { ensureRemindersReady, syncDayReminders } from "../reminderSync";
 import { itemsToArm } from "../horizonItems";
 import { createNavigationContainerRef } from "@react-navigation/native";
@@ -91,6 +104,8 @@ export default function AppBackgroundSync() {
     Number(aiMuteUntil) || 0
   );
   const appState = useRef(AppState.currentState);
+  const itemsRef = useRef(todayItems);
+  itemsRef.current = todayItems;
 
   // When the local AI mute lapses, clear it so the effect below replans and
   // anything that came due while the user was chatting rings one at a time.
@@ -100,6 +115,10 @@ export default function AppBackgroundSync() {
     const timer = setTimeout(() => dispatch(expireAiMute()), wait);
     return () => clearTimeout(timer);
   }, [aiMuteUntil, dispatch]);
+
+  useEffect(() => {
+    dispatch(hydrateAppLimits());
+  }, [dispatch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,6 +131,51 @@ export default function AppBackgroundSync() {
     return () => {
       cancelled = true;
     };
+  }, [dispatch]);
+
+  useEffect(() => {
+    let closed = false;
+    const inflight = new Set();
+    const runAutoSkip = async (event) => {
+      const itemId = String(event?.itemId || "");
+      if (!itemId || inflight.has(itemId)) return;
+      inflight.add(itemId);
+      const reason = event?.reason || "unanswered";
+      try {
+        await dispatch(skipItem({ itemId, reason })).unwrap();
+        await ackTaskCallAutoSkip(itemId);
+      } catch (_e) {
+        inflight.delete(itemId);
+      }
+    };
+    peekPendingTaskCallAutoSkips()
+      .then((rows) => {
+        if (closed) return;
+        for (const row of rows || []) runAutoSkip(row);
+      })
+      .catch(() => {});
+    const unsubscribe = subscribeTaskCallAutoSkip((event) => {
+      if (!closed) runAutoSkip(event);
+    });
+    return () => {
+      closed = true;
+      unsubscribe();
+    };
+  }, [dispatch]);
+
+  useEffect(() => {
+    return subscribeTaskCallDismiss((event) => {
+      if (event?.reason !== "reject" || !event.itemId) return;
+      const phase = event.phase === "end" ? "end" : "start";
+      const fallback = phase === "end" ? END_FOLLOWUP_MIN : START_SNOOZE_MIN;
+      const minutes = Number(event.minutes) > 0 ? Number(event.minutes) : fallback;
+      const item = (itemsRef.current || []).find((row) => String(row._id) === String(event.itemId));
+      if (phase === "end" && item?.startedAt) {
+        dispatch(remindLaterItem({ itemId: String(event.itemId), minutes }));
+      } else {
+        dispatch(snoozeItem({ itemId: String(event.itemId), minutes }));
+      }
+    });
   }, [dispatch]);
 
   useEffect(() => {

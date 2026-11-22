@@ -1,7 +1,7 @@
 import { NativeEventEmitter, NativeModules, PermissionsAndroid, Platform } from "react-native";
 import { composeEndCallCue, composeStartCallCue } from "./voiceAgent";
-import { durationOf, END_FOLLOWUP_MIN, START_SNOOZE_MIN } from "./taskCallConfig";
-import { planTaskCalls, resolveCallDelay } from "./taskCallPlanner";
+import { durationOf, explicitDurationMin, snoozeDelayMs } from "./taskCallConfig";
+import { planTaskCalls } from "./taskCallPlanner";
 
 const { TaskReminderModule } = NativeModules;
 
@@ -30,7 +30,17 @@ export async function syncTaskAlerts(items, { voiceAlerts = true, name = "Raj", 
     return true;
   }
 
-  const planned = planTaskCalls(items, { voiceAlerts: voiceAlerts !== false, name, pausedUntil });
+  let endGaveUpIds = [];
+  if (TaskReminderModule.getEndGaveUpIds) {
+    const raw = await TaskReminderModule.getEndGaveUpIds();
+    endGaveUpIds = Array.isArray(raw) ? raw.map((id) => String(id)) : [];
+  }
+  const planned = planTaskCalls(items, {
+    voiceAlerts: voiceAlerts !== false,
+    name,
+    pausedUntil,
+    endGaveUpIds,
+  });
 
   if (TaskReminderModule.replaceTaskCalls) {
     await TaskReminderModule.replaceTaskCalls(planned);
@@ -61,17 +71,15 @@ function callPayload(item, phase) {
     spokenText: phase === "end" ? composeEndCallCue(item) : composeStartCallCue(item),
     alertLevel: item.alertLevel || "normal",
     phase: phase === "end" ? "end" : "start",
-    durationMin: durationOf(item),
+    durationMin: explicitDurationMin(item),
     domain: item.domain || "",
   };
 }
 
-export async function snoozeTaskCall(item, { phase = "start", minutes, items = [] } = {}) {
+export async function snoozeTaskCall(item, { phase = "start", minutes } = {}) {
   if (!available || !TaskReminderModule.snoozeCall) return false;
-  const requested = Number(minutes) > 0 ? Number(minutes) : phase === "end" ? END_FOLLOWUP_MIN : START_SNOOZE_MIN;
-  const resolved = resolveCallDelay(items, { itemId: item?._id || item?.id, minutes: requested });
   const payload = callPayload(item, phase);
-  const delay = resolved.delayMs;
+  const delay = snoozeDelayMs(phase, minutes);
   return TaskReminderModule.snoozeCall(
     payload.id,
     payload.title,
@@ -80,7 +88,8 @@ export async function snoozeTaskCall(item, { phase = "start", minutes, items = [
     payload.phase,
     payload.durationMin,
     payload.domain,
-    delay
+    delay,
+    true
   );
 }
 
@@ -170,6 +179,51 @@ export function subscribeTaskCallSpeech(handler) {
   if (!speechEmitter) return () => {};
   const sub = speechEmitter.addListener("TaskCallSpeech", handler);
   return () => sub.remove();
+}
+
+export function subscribeTaskCallAutoSkip(handler) {
+  if (!speechEmitter) return () => {};
+  const sub = speechEmitter.addListener("TaskCallAutoSkip", handler);
+  return () => sub.remove();
+}
+
+export function subscribeTaskCallDismiss(handler) {
+  if (!speechEmitter) return () => {};
+  const sub = speechEmitter.addListener("TaskCallDismissed", handler);
+  return () => sub.remove();
+}
+
+export async function peekPendingTaskCallAutoSkips() {
+  if (!available || !TaskReminderModule.peekPendingAutoSkips) return [];
+  try {
+    const rows = await TaskReminderModule.peekPendingAutoSkips();
+    return Array.isArray(rows) ? rows : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+export async function ackTaskCallAutoSkip(itemId) {
+  if (!available || !TaskReminderModule.ackAutoSkip || !itemId) return false;
+  return TaskReminderModule.ackAutoSkip(String(itemId));
+}
+
+export async function noteTaskCallUnanswered(call) {
+  if (!available || !TaskReminderModule.noteUnanswered || !call?.itemId) return false;
+  return TaskReminderModule.noteUnanswered(
+    String(call.itemId),
+    String(call.title || "Task"),
+    String(call.spokenText || ""),
+    String(call.alertLevel || "normal"),
+    call.phase === "end" ? "end" : "start",
+    Number(call.durationMin) || 0,
+    String(call.domain || "")
+  );
+}
+
+export async function clearEndGaveUp(itemId) {
+  if (!available || !TaskReminderModule.clearEndGaveUp || !itemId) return false;
+  return TaskReminderModule.clearEndGaveUp(String(itemId));
 }
 
 export async function startTaskCallListening() {

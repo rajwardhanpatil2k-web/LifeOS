@@ -4,6 +4,7 @@ import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
+import com.raj.lifeos.applimit.AppLimitModule
 import com.raj.lifeos.voice.VoiceAgentModule
 import com.raj.lifeos.taskalert.TaskReminderModule
 
@@ -12,7 +13,8 @@ class WakeAlarmPackage : ReactPackage {
     return listOf(
       WakeAlarmModule(reactContext),
       VoiceAgentModule(reactContext),
-      TaskReminderModule(reactContext)
+      TaskReminderModule(reactContext),
+      AppLimitModule(reactContext)
     )
   }
 

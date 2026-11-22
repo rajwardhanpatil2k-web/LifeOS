@@ -127,8 +127,8 @@ export default function SettingsScreen({ navigation }) {
       >
         <Text style={styles.hint}>
           When a task starts, Life OS rings like a call with Answer and Reject. Reject snoozes 5 minutes.
-          Answer and say you're ready to start; at the end time it calls again to confirm you finished, or
-          reminds you in 15 minutes. Long-press this card to test the full call now.
+          Answer and say you're ready to start. If the task has a duration, it calls again when that time is up.
+          Three missed start rings skip the task. Long-press this card to test the full call now.
         </Text>
         {!isTaskAlertsAvailable() && !isVoiceAgentAvailable() ? (
           <Text style={styles.voiceNote}>
@@ -242,6 +242,15 @@ export default function SettingsScreen({ navigation }) {
         </Text>
       ) : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
+
+      <Text style={styles.sectionLabel}>App limits</Text>
+      <Pressable style={styles.card} onPress={() => navigation.navigate("AppLimits")}>
+        <Text style={[styles.hint, { marginBottom: 8 }]}>
+          Choose an app, such as Instagram or YouTube, and set how long it can stay open today. Life OS shows the
+          time left while you use it, and blocks the app when that time is gone. The count starts over at midnight.
+        </Text>
+        <Text style={styles.link}>Set app limits →</Text>
+      </Pressable>
 
       <Text style={styles.sectionLabel}>Permissions</Text>
       <Pressable style={styles.card} onPress={() => navigation.navigate("Permissions")}>

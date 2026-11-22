@@ -28,7 +28,8 @@ object TaskReminderScheduler {
     val at: Long,
     val phase: String,
     val durationMin: Int,
-    val domain: String
+    val domain: String,
+    val kind: String = ""
   )
 
   fun pausedUntil(context: Context): Long =
@@ -74,7 +75,15 @@ object TaskReminderScheduler {
     val merged = planned.map { reminder ->
       val override = keptOverrides.find { it.id == reminder.id && it.phase == reminder.phase }
       var at = reminder.at
-      if (override != null && override.at > at) at = override.at
+      if (override != null) {
+        val soon = now + 15 * 60 * 1000L
+        val freshBurst = override.kind == "burst" && override.at in (now + 1_000L)..(now + 90_000L)
+        // A 4-second redial stays put while the planner's catch-up is still
+        // inside the next 15 minutes. A real later slot, such as tomorrow,
+        // is left on its clock time.
+        if (freshBurst && at <= soon) at = override.at
+        else if (override.kind != "burst" && override.at > at) at = override.at
+      }
       // A 9:00 alarm synced at 8:59:59.5 used to be dropped (at <= now+1s) and
       // never re-armed. Bump imminent times instead of deleting them.
       if (at in (now - 120_000L)..(now + 1_000L)) at = now + 2_000L
@@ -147,21 +156,40 @@ object TaskReminderScheduler {
     return at
   }
 
-  fun snooze(context: Context, base: Reminder, delayMs: Long) {
+  fun snooze(context: Context, base: Reminder, delayMs: Long, shiftNeighbors: Boolean = false) {
     if (!isEnabled(context) || base.id.isBlank()) return
     val now = System.currentTimeMillis()
     val pause = pausedUntil(context)
     val desired = now + delayMs.coerceAtLeast(3_000L)
-    val gated = if (pause > now) maxOf(desired, pause) else desired
-    val at = nextFreeAt(context, gated, base.id, base.phase)
-    val reminder = base.copy(at = at)
-    val overrides = loadOverrides(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
-    overrides.add(reminder)
-    saveOverrides(context, overrides)
-    val reminders = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
-    reminders.add(reminder)
-    save(context, reminders)
-    arm(context, reminder)
+    val at = if (pause > now) maxOf(desired, pause) else desired
+    val reminder = base.copy(at = at, kind = if (shiftNeighbors) "snooze" else base.kind)
+    remember(context, reminder)
+    if (shiftNeighbors) respaceAround(context, reminder) else arm(context, reminder)
+  }
+
+  fun armExact(context: Context, base: Reminder, at: Long, kind: String) {
+    if (!isEnabled(context) || base.id.isBlank()) return
+    val now = System.currentTimeMillis()
+    val pause = pausedUntil(context)
+    var whenAt = if (at <= now + 500L) now + 2_000L else at
+    if (pause > now && whenAt < pause) whenAt = pause
+    remember(context, base.copy(at = whenAt, kind = kind))
+    arm(context, base.copy(at = whenAt, kind = kind))
+  }
+
+  fun cancelPendingBurst(context: Context, id: String, phase: String) {
+    if (id.isBlank()) return
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val bursts = load(context).filter { it.id == id && it.phase == phase && it.kind == "burst" && it.at > System.currentTimeMillis() + 1_500L }
+    for (reminder in bursts) {
+      try { am.cancel(operation(context, reminder)) } catch (_: Exception) {}
+    }
+    if (bursts.isEmpty()) {
+      saveOverrides(context, loadOverrides(context).filter { it.id != id || it.phase != phase || it.kind != "burst" })
+      return
+    }
+    save(context, load(context).filter { it.id != id || it.phase != phase || it.kind != "burst" })
+    saveOverrides(context, loadOverrides(context).filter { it.id != id || it.phase != phase || it.kind != "burst" })
   }
 
   fun clearOverride(context: Context, id: String) {
@@ -175,6 +203,16 @@ object TaskReminderScheduler {
     }
     save(context, load(context).filter { it.id != id })
     saveOverrides(context, loadOverrides(context).filter { it.id != id })
+  }
+
+  fun cancelPhase(context: Context, id: String, phase: String) {
+    if (id.isBlank()) return
+    val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    for (existing in load(context).filter { it.id == id && it.phase == phase }) {
+      try { am.cancel(operation(context, existing)) } catch (_: Exception) {}
+    }
+    save(context, load(context).filter { it.id != id || it.phase != phase })
+    saveOverrides(context, loadOverrides(context).filter { it.id != id || it.phase != phase })
   }
 
   fun cancelAll(context: Context) {
@@ -207,6 +245,39 @@ object TaskReminderScheduler {
     save(context, restored)
     for (reminder in restored) arm(context, reminder)
     if (!TaskCallState.busy()) TaskCallQueue.parkAll(context, QUEUE_RELEASE_MS)
+  }
+
+  private fun remember(context: Context, reminder: Reminder) {
+    val overrides = loadOverrides(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
+    overrides.add(reminder)
+    saveOverrides(context, overrides)
+    val reminders = load(context).filter { it.id != reminder.id || it.phase != reminder.phase }.toMutableList()
+    reminders.add(reminder)
+    save(context, reminders)
+  }
+
+  private fun respaceAround(context: Context, fixed: Reminder) {
+    val original = load(context).filter { it.id != fixed.id || it.phase != fixed.phase }.sortedBy { it.at }
+    val originalAt = original.associate { (it.id to it.phase) to it.at }
+    val placed = mutableListOf(fixed)
+    val occupied = mutableListOf(fixed.at)
+    for (item in original) {
+      val at = spacedAt(occupied, item.at)
+      placed.add(if (at == item.at) item else item.copy(at = at, kind = item.kind.ifBlank { "shifted" }))
+      occupied.add(if (at == item.at) item.at else at)
+    }
+    save(context, placed)
+    val overrides = loadOverrides(context).toMutableList()
+    for (item in placed) {
+      if (item.id == fixed.id && item.phase == fixed.phase) continue
+      val previous = originalAt[item.id to item.phase] ?: continue
+      if (item.at == previous) continue
+      val index = overrides.indexOfFirst { it.id == item.id && it.phase == item.phase }
+      val next = if (index >= 0) overrides[index].copy(at = item.at) else item
+      if (index >= 0) overrides[index] = next else overrides.add(next)
+    }
+    saveOverrides(context, overrides)
+    for (item in placed) arm(context, item)
   }
 
   private fun cancelArmed(context: Context) {
@@ -270,6 +341,7 @@ object TaskReminderScheduler {
     intent.putExtra(TaskCallIntents.EXTRA_PHASE, reminder.phase)
     intent.putExtra(TaskCallIntents.EXTRA_DURATION, reminder.durationMin)
     intent.putExtra(TaskCallIntents.EXTRA_DOMAIN, reminder.domain)
+    intent.putExtra(TaskCallIntents.EXTRA_KIND, reminder.kind)
     val flags = PendingIntent.FLAG_UPDATE_CURRENT or
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
     return PendingIntent.getBroadcast(context, requestCode(reminder.id, reminder.phase), intent, flags)
@@ -300,8 +372,9 @@ object TaskReminderScheduler {
         val phase = obj.optString("phase", TaskCallState.PHASE_START)
         val durationMin = obj.optInt("durationMin", 0)
         val domain = obj.optString("domain")
+        val kind = obj.optString("kind")
         if (id.isBlank() || title.isBlank() || at <= 0L) null
-        else Reminder(id, title, spokenText, alertLevel, at, phase, durationMin, domain)
+        else Reminder(id, title, spokenText, alertLevel, at, phase, durationMin, domain, kind)
       }
     } catch (_: Exception) {
       emptyList()
@@ -320,6 +393,7 @@ object TaskReminderScheduler {
       obj.put("phase", reminder.phase)
       obj.put("durationMin", reminder.durationMin)
       obj.put("domain", reminder.domain)
+      obj.put("kind", reminder.kind)
       arr.put(obj)
     }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

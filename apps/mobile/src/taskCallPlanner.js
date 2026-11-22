@@ -2,8 +2,7 @@ import { composeEndCallCue, composeStartCallCue } from "./voiceAgent";
 import {
   AFTER_CALL_COOLDOWN_MS,
   CALL_GAP_MS,
-  durationOf,
-  endTimeMillis,
+  explicitDurationMin,
   startMillis,
 } from "./taskCallConfig";
 
@@ -55,16 +54,19 @@ function draftStart(item, now, pausedUntil) {
   };
 }
 
-function draftEnd(item, now, pausedUntil) {
-  const durationMs = durationOf(item) * 60 * 1000;
-  if (durationMs <= 0) return null;
-  const scheduledStart = startMillis(item.scheduledAt, new Date(now), item.planDate);
-  const scheduledEnd = scheduledStart > 0 ? scheduledStart + durationMs : 0;
-  // "I'm ready" owns the remaining duration. If they never started, the
-  // scheduled slot still gets a "did you finish?" ring (9:00 + 30m → 9:30).
-  const startedEnd = item.startedAt ? endTimeMillis(item) : 0;
+function draftEnd(item, now, pausedUntil, gaveUp) {
+  // The end call waits until the user has started the task. A late open of
+  // the app must still ask "are you ready?" before "did you finish?"
+  if (!item.startedAt) return null;
   const followUp = parseMillis(item.followUpUntil);
-  const clock = Math.max(scheduledEnd, startedEnd, followUp);
+  const followUpFuture = followUp > now;
+  const durationMin = explicitDurationMin(item);
+  if (gaveUp && !followUpFuture) return null;
+  if (durationMin <= 0 && !followUpFuture) return null;
+  const started = new Date(item.startedAt).getTime();
+  const startedEnd =
+    Number.isFinite(started) && started > 0 && durationMin > 0 ? started + durationMin * 60 * 1000 : 0;
+  const clock = Math.max(startedEnd, followUp);
   const armed = armAt(clock, now);
   if (!armed) return null;
   const at = clampPause(armed.at, now, pausedUntil);
@@ -78,13 +80,9 @@ function draftEnd(item, now, pausedUntil) {
   };
 }
 
-function draftsForItem(item, now, pausedUntil) {
+function draftsForItem(item, now, pausedUntil, gaveUp) {
   const start = draftStart(item, now, pausedUntil);
-  const end = draftEnd(item, now, pausedUntil);
-  if (start?.catchUp && end?.catchUp) return [end];
-  if (start && end && Math.abs(start.at - end.at) < 60_000) {
-    return [end.catchUp || start.catchUp ? end : start];
-  }
+  const end = draftEnd(item, now, pausedUntil, gaveUp);
   return [start, end].filter(Boolean);
 }
 
@@ -145,18 +143,23 @@ function toReminder(draft, { voiceAlerts, name }) {
     alertLevel: item.alertLevel === "info" ? "info" : item.alertLevel || "normal",
     at,
     phase,
-    durationMin: durationOf(item),
+    durationMin: explicitDurationMin(item),
     domain: item.domain || "",
     item,
   };
 }
 
-export function planTaskCalls(items, { now = Date.now(), voiceAlerts = true, name = "Raj", pausedUntil = 0 } = {}) {
+export function planTaskCalls(
+  items,
+  { now = Date.now(), voiceAlerts = true, name = "Raj", pausedUntil = 0, endGaveUpIds = [] } = {}
+) {
   const pending = (items || []).filter(isCallableItem);
   const pauseMs = Number(pausedUntil) > now ? Number(pausedUntil) : 0;
+  const gaveUp = new Set((endGaveUpIds || []).map((id) => String(id)));
   const drafts = [];
   for (const item of pending) {
-    drafts.push(...draftsForItem(item, now, pauseMs));
+    const id = String(item._id || item.originKey || item.key || "");
+    drafts.push(...draftsForItem(item, now, pauseMs, gaveUp.has(id)));
   }
   return spaceCalls(drafts, now).map((draft) => toReminder(draft, { voiceAlerts, name }));
 }

@@ -21,26 +21,30 @@ class TaskCallActionReceiver : BroadcastReceiver() {
 
     when (intent.action) {
       ACTION_ANSWER -> {
+        TaskCallState.clearRingAttempts(context, id, phase)
         TaskAlertService.silence(context)
         TaskCallState.inSession = true
         TaskCallIntents.launchScreen(context, id, phase, title, alertLevel, durationMin, domain, pickedUp = true)
       }
       ACTION_REJECT -> {
+        TaskCallState.clearRingAttempts(context, id, phase)
+        TaskCallState.clearBurst(context, id, phase)
+        TaskCallState.clearSilentFailures(context, id, phase)
         TaskAlertService.stop(context)
         TaskCallQueue.parkAll(context, TaskReminderScheduler.QUEUE_RELEASE_MS)
         if (id.isNotBlank()) {
-          val delay = if (phase == TaskCallState.PHASE_END) {
-            TaskReminderScheduler.END_FOLLOWUP_MS
-          } else {
-            TaskReminderScheduler.START_SNOOZE_MS
-          }
+          val end = phase == TaskCallState.PHASE_END
+          val delay = if (end) TaskReminderScheduler.END_FOLLOWUP_MS else TaskReminderScheduler.START_SNOOZE_MS
+          val minutes = if (end) 15 else 5
           TaskReminderScheduler.snooze(
             context,
             TaskReminderScheduler.Reminder(
               id, title, spokenText, alertLevel, 0L, phase, durationMin, domain
             ),
-            delay
+            delay,
+            shiftNeighbors = true
           )
+          TaskCallEvents.emitDismiss(context, id, phase, "reject", minutes)
         }
       }
     }

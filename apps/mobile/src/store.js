@@ -1,12 +1,13 @@
 import { configureStore, createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { api, isNetworkError } from "./api";
-import { drainOutbox, postOrQueue, clientStamp } from "./outbox";
+import { drainOutbox, enqueue, postOrQueue, clientStamp } from "./outbox";
 import { loadPlanCache, savePlanCache } from "./planCache";
-import { isTaskCallRinging, setTaskAlertsPausedUntil, stopTaskAlert } from "./taskAlerts";
+import { clearEndGaveUp, getActiveTaskCall, isTaskCallRinging, setTaskAlertsPausedUntil, stopTaskAlert } from "./taskAlerts";
 import { AI_MUTE_GRACE_MS, AI_MUTE_LEASE_MS } from "./taskCallConfig";
 import authReducer from "./authSlice";
 import shiftReducer from "./shiftSlice";
 import workoutReducer from "./workoutSlice";
+import appLimitsReducer from "./appLimitSlice";
 
 let mutationEpoch = 0;
 let inflightMutations = 0;
@@ -43,10 +44,99 @@ export const fetchToday = createAsyncThunk("today/fetch", async (_, { dispatch }
   }
 });
 export const fetchWeek = createAsyncThunk("today/week", async () => api("/api/week"));
+function resolveItemId(arg) {
+  if (typeof arg === "string") return String(arg);
+  if (arg && arg.itemId != null) return String(arg.itemId);
+  return "";
+}
+
+function currentIstHhmm() {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .format(new Date())
+    .replace(/\u202f/g, " ");
+}
+
+function scorePlan(items) {
+  const list = items || [];
+  const actionable = list.filter((i) => i.alertLevel !== "info");
+  const total = actionable.length;
+  const completed = actionable.filter((i) => i.status === "done").length;
+  const skipped = list.filter((i) => i.status === "skipped").length;
+  const overall = total ? Math.round((completed / total) * 100) : 0;
+  const byDomain = {};
+  for (const item of list) {
+    if (!byDomain[item.domain]) byDomain[item.domain] = { done: 0, total: 0 };
+    if (item.alertLevel !== "info") {
+      byDomain[item.domain].total += 1;
+      if (item.status === "done") byDomain[item.domain].done += 1;
+    }
+  }
+  return { overall, completed, total, skipped, byDomain };
+}
+
+function nextAction(items, hhmm = currentIstHhmm()) {
+  const pending = (items || []).filter((i) => i.status === "pending");
+  if (!pending.length) return null;
+  const due = pending.filter((i) => i.scheduledAt <= hhmm);
+  return due.length ? due[0] : pending[0];
+}
+
+function planMetaAfterItems(items) {
+  return { score: scorePlan(items), next: nextAction(items) };
+}
+
+function buildOptimisticPayload(data, updatedItem) {
+  const items = (data?.items || []).map((row) => (sameItem(row, updatedItem) ? updatedItem : row));
+  return { ...planMetaAfterItems(items), item: updatedItem };
+}
+
+function mergeTodayPayload(local, server) {
+  if (!local?.items || !server?.items) return server;
+  const localById = new Map(local.items.map((row) => [String(row._id), row]));
+  const mergedItems = server.items.map((serverItem) => {
+    const local = localById.get(String(serverItem._id));
+    if (!local) return serverItem;
+    if (local.status !== "pending" && serverItem.status === "pending") {
+      return {
+        ...serverItem,
+        status: local.status,
+        steps: local.steps,
+        skippedReason: local.skippedReason,
+        startedAt: local.startedAt,
+      };
+    }
+    return serverItem;
+  });
+  const hhmm = currentIstHhmm();
+  return {
+    ...server,
+    items: mergedItems,
+    ...planMetaAfterItems(mergedItems, hhmm),
+  };
+}
+
 function currentItem(getState, itemId) {
   const data = getState().today.data;
   const item = (data?.items || []).find((row) => String(row._id) === String(itemId));
   return { data, item };
+}
+
+function stopRingingItem(itemId) {
+  getActiveTaskCall()
+    .then((active) => {
+      if (active && String(active.itemId) === String(itemId)) return stopTaskAlert();
+      return false;
+    })
+    .catch(() => {});
+}
+
+function forgetEndCall(itemId) {
+  if (itemId) clearEndGaveUp(itemId).catch(() => {});
 }
 
 export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPayload, { getState }) => {
@@ -56,61 +146,82 @@ export const completeItem = createAsyncThunk("today/complete", async (itemIdOrPa
   const source = typeof itemIdOrPayload === "object" ? itemIdOrPayload.source : undefined;
   const stamp = clientStamp("complete", itemId);
   const { data, item } = currentItem(getState, itemId);
+  stopRingingItem(itemId);
+  forgetEndCall(itemId);
+  const updated =
+    item
+      ? {
+          ...item,
+          status: "done",
+          steps: (item.steps || []).map((step) => ({ ...step, done: true })),
+        }
+      : null;
   return postOrQueue({
     path: `/api/items/${itemId}/complete`,
     body: { ...stamp, source, date: data?.date },
-    optimistic: item
-      ? {
-          item: {
-            ...item,
-            status: "done",
-            steps: (item.steps || []).map((step) => ({ ...step, done: true })),
-          },
-          score: data?.score,
-          next: data?.next,
-        }
-      : null,
+    optimistic: item && updated ? buildOptimisticPayload(data, updated) : null,
   });
 });
-export const markItemReady = createAsyncThunk("today/ready", async (itemId) =>
-  api(`/api/items/${itemId}/ready`, { method: "POST", body: JSON.stringify({ source: "task_call" }) })
-);
+export const markItemReady = createAsyncThunk("today/ready", async (itemId) => {
+  forgetEndCall(itemId);
+  return api(`/api/items/${itemId}/ready`, { method: "POST", body: JSON.stringify({ source: "task_call" }) });
+});
 export const snoozeItem = createAsyncThunk("today/snooze", async ({ itemId, minutes = 5 }) =>
   api(`/api/items/${itemId}/snooze`, { method: "POST", body: JSON.stringify({ minutes, source: "task_call" }) })
 );
-export const remindLaterItem = createAsyncThunk("today/remindLater", async ({ itemId, minutes = 15 }) =>
-  api(`/api/items/${itemId}/remind-later`, { method: "POST", body: JSON.stringify({ minutes, source: "task_call" }) })
-);
-export const skipItem = createAsyncThunk("today/skip", async (itemId, { getState }) => {
+export const remindLaterItem = createAsyncThunk("today/remindLater", async ({ itemId, minutes = 15 }) => {
+  forgetEndCall(itemId);
+  return api(`/api/items/${itemId}/remind-later`, { method: "POST", body: JSON.stringify({ minutes, source: "task_call" }) });
+});
+export const skipItem = createAsyncThunk("today/skip", async (itemIdOrPayload, { getState }) => {
+  const itemId = resolveItemId(itemIdOrPayload);
+  const reason =
+    typeof itemIdOrPayload === "object" && itemIdOrPayload?.reason
+      ? String(itemIdOrPayload.reason)
+      : "skipped";
   const stamp = clientStamp("skip", itemId);
   const { data, item } = currentItem(getState, itemId);
-  return postOrQueue({
+  stopRingingItem(itemId);
+  forgetEndCall(itemId);
+  const updated = item ? { ...item, status: "skipped", skippedReason: reason } : null;
+  const body = { ...stamp, reason, date: data?.date };
+  if (item && updated) {
+    return postOrQueue({
+      path: `/api/items/${itemId}/skip`,
+      body,
+      optimistic: buildOptimisticPayload(data, updated),
+    });
+  }
+  await enqueue({
     path: `/api/items/${itemId}/skip`,
-    body: { ...stamp, reason: "skipped", date: data?.date },
-    optimistic: item
-      ? { item: { ...item, status: "skipped", skippedReason: "skipped" }, score: data?.score, next: data?.next }
-      : null,
+    body,
+    clientId: stamp.clientId,
   });
+  drainOutbox().catch(() => {});
+  return {
+    queued: true,
+    item: { _id: itemId, status: "skipped", skippedReason: reason },
+    score: data?.score,
+    next: data?.next,
+  };
 });
 export const undoItem = createAsyncThunk("today/undo", async (itemId, { getState }) => {
   const stamp = clientStamp("undo", itemId);
+  forgetEndCall(itemId);
   const { data, item } = currentItem(getState, itemId);
+  const updated = item
+    ? {
+        ...item,
+        status: "pending",
+        skippedReason: undefined,
+        startedAt: undefined,
+        steps: (item.steps || []).map((step) => ({ ...step, done: false })),
+      }
+    : null;
   return postOrQueue({
     path: `/api/items/${itemId}/undo`,
     body: { ...stamp, date: data?.date },
-    optimistic: item
-      ? {
-          item: {
-            ...item,
-            status: "pending",
-            skippedReason: undefined,
-            startedAt: undefined,
-            steps: (item.steps || []).map((step) => ({ ...step, done: false })),
-          },
-          score: data?.score,
-          next: data?.next,
-        }
-      : null,
+    optimistic: item && updated ? buildOptimisticPayload(data, updated) : null,
   });
 });
 export const toggleStep = createAsyncThunk("today/step", async ({ itemId, stepKey }, { getState }) => {
@@ -121,10 +232,11 @@ export const toggleStep = createAsyncThunk("today/step", async ({ itemId, stepKe
   );
   const allDone = steps.length > 0 && steps.every((step) => step.done);
   const status = allDone ? "done" : item?.status === "done" ? "pending" : item?.status;
+  const updated = item ? { ...item, steps, status } : null;
   return postOrQueue({
     path: `/api/items/${itemId}/steps/${stepKey}`,
     body: { ...stamp, date: data?.date },
-    optimistic: item ? { item: { ...item, steps, status }, score: data?.score, next: data?.next } : null,
+    optimistic: item && updated ? buildOptimisticPayload(data, updated) : null,
   });
 });
 // `order` is the new id sequence for whichever subset of today's items was
@@ -199,6 +311,42 @@ function applyItemUpdate(state, action) {
   );
 }
 
+function applyOptimisticFromItem(state, updatedItem) {
+  if (!state.data || !updatedItem) return;
+  applyItemUpdate(state, { payload: buildOptimisticPayload(state.data, updatedItem) });
+}
+
+function optimisticCompleteItem(item) {
+  return {
+    ...item,
+    status: "done",
+    steps: (item.steps || []).map((step) => ({ ...step, done: true })),
+  };
+}
+
+function optimisticSkipItem(item, reason = "skipped") {
+  return { ...item, status: "skipped", skippedReason: reason };
+}
+
+function optimisticUndoItem(item) {
+  return {
+    ...item,
+    status: "pending",
+    skippedReason: undefined,
+    startedAt: undefined,
+    steps: (item.steps || []).map((step) => ({ ...step, done: false })),
+  };
+}
+
+function optimisticToggleStep(item, stepKey) {
+  const steps = (item.steps || []).map((step) =>
+    step.key === stepKey ? { ...step, done: !step.done } : step
+  );
+  const allDone = steps.length > 0 && steps.every((step) => step.done);
+  const status = allDone ? "done" : item.status === "done" ? "pending" : item.status;
+  return { ...item, steps, status };
+}
+
 function applyScheduleUpdate(state, action) {
   if (!state.data) return;
   state.data.items = action.payload.items;
@@ -247,6 +395,7 @@ const todaySlice = createSlice({
     week: null,
     horizon: null,
     offline: false,
+    itemActionId: null,
   },
   reducers: {
     showCachedPlan(state, action) {
@@ -268,9 +417,63 @@ const todaySlice = createSlice({
         state.loading = false;
         if (state.latestFetchId !== action.meta.requestId) return;
         if (action.payload.epoch !== mutationEpoch || inflightMutations > 0) return;
-        state.data = action.payload.data;
+        state.data = state.data
+          ? mergeTodayPayload(state.data, action.payload.data)
+          : action.payload.data;
         state.offline = action.payload.offline === true;
         if (action.payload.horizon) state.horizon = action.payload.horizon;
+      })
+      .addCase(completeItem.pending, (state, action) => {
+        const itemId = resolveItemId(action.meta.arg);
+        state.itemActionId = itemId || null;
+        const item = (state.data?.items || []).find((row) => String(row._id) === itemId);
+        if (item) applyOptimisticFromItem(state, optimisticCompleteItem(item));
+      })
+      .addCase(skipItem.pending, (state, action) => {
+        const itemId = resolveItemId(action.meta.arg);
+        const reason =
+          typeof action.meta.arg === "object" && action.meta.arg?.reason
+            ? String(action.meta.arg.reason)
+            : "skipped";
+        state.itemActionId = itemId || null;
+        const item = (state.data?.items || []).find((row) => String(row._id) === itemId);
+        if (item) applyOptimisticFromItem(state, optimisticSkipItem(item, reason));
+      })
+      .addCase(undoItem.pending, (state, action) => {
+        const itemId = resolveItemId(action.meta.arg);
+        state.itemActionId = itemId || null;
+        const item = (state.data?.items || []).find((row) => String(row._id) === itemId);
+        if (item) applyOptimisticFromItem(state, optimisticUndoItem(item));
+      })
+      .addCase(toggleStep.pending, (state, action) => {
+        const { itemId, stepKey } = action.meta.arg || {};
+        state.itemActionId = itemId ? String(itemId) : null;
+        const item = (state.data?.items || []).find((row) => String(row._id) === String(itemId));
+        if (item && stepKey) applyOptimisticFromItem(state, optimisticToggleStep(item, stepKey));
+      })
+      .addCase(completeItem.fulfilled, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(completeItem.rejected, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(skipItem.fulfilled, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(skipItem.rejected, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(undoItem.fulfilled, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(undoItem.rejected, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(toggleStep.fulfilled, (state) => {
+        state.itemActionId = null;
+      })
+      .addCase(toggleStep.rejected, (state) => {
+        state.itemActionId = null;
       })
       .addCase(fetchToday.rejected, (state, action) => {
         if (state.latestFetchId !== action.meta.requestId) return;
@@ -549,5 +752,6 @@ export const store = configureStore({
     auth: authReducer,
     shift: shiftReducer,
     workout: workoutReducer,
+    appLimits: appLimitsReducer,
   },
 });

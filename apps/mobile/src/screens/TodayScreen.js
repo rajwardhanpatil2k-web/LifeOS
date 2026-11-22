@@ -224,6 +224,8 @@ const ItemCard = memo(function ItemCard({
   onLogWorkout,
 }) {
   const dispatch = useDispatch();
+  const itemActionId = useSelector((s) => s.today.itemActionId);
+  const actionBusy = itemActionId != null && String(itemActionId) === String(item._id);
   const meta = domainMeta(item.domain);
   const isOptional = item.alertLevel === "info";
   const isAi = item.source === "ai" || item.carryForward;
@@ -307,10 +309,18 @@ const ItemCard = memo(function ItemCard({
       ))}
       {item.status === "pending" && !selectMode ? (
         <View style={styles.row}>
-          <Pressable style={styles.btnDone} onPress={() => dispatch(completeItem(item._id))}>
+          <Pressable
+            style={[styles.btnDone, actionBusy && styles.btnBusy]}
+            disabled={actionBusy}
+            onPress={() => dispatch(completeItem(item._id))}
+          >
             <Text style={styles.btnDoneText}>Mark done</Text>
           </Pressable>
-          <Pressable style={styles.btnSkip} onPress={() => dispatch(skipItem(item._id))}>
+          <Pressable
+            style={[styles.btnSkip, actionBusy && styles.btnBusy]}
+            disabled={actionBusy}
+            onPress={() => dispatch(skipItem(item._id))}
+          >
             <Text style={styles.btnSkipText}>Skip</Text>
           </Pressable>
           {onLogWorkout ? (
@@ -474,6 +484,7 @@ function createStyles(colors) {
     btnDone: { backgroundColor: colors.gold, borderRadius: 9, paddingVertical: 8, paddingHorizontal: 14 },
     btnDoneText: { color: "#1a1508", fontWeight: "700", fontSize: 12.5 },
     btnSkip: { borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingVertical: 8, paddingHorizontal: 14 },
+    btnBusy: { opacity: 0.55 },
     btnSkipText: { color: colors.muted, fontWeight: "600", fontSize: 12.5 },
     statusTag: { fontSize: 11, textTransform: "capitalize" },
     statusDone: { color: colors.success },

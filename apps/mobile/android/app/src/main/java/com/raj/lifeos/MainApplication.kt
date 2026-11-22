@@ -17,6 +17,7 @@ import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
 
 import com.raj.lifeos.wakealarm.WakeAlarmPackage
+import com.raj.lifeos.applimit.AppLimitMonitorService
 
 class MainApplication : Application(), ReactApplication {
 
@@ -51,6 +52,10 @@ class MainApplication : Application(), ReactApplication {
       load()
     }
     ApplicationLifecycleDispatcher.onApplicationCreate(this)
+    try {
+      AppLimitMonitorService.sync(this)
+    } catch (_: Exception) {
+    }
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {

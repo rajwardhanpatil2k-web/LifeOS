@@ -3,10 +3,12 @@ import { AppState, BackHandler, Pressable, StyleSheet, Text, View } from "react-
 import { Ionicons } from "@expo/vector-icons";
 import { useDispatch, useSelector } from "react-redux";
 import { colors, domainMeta } from "../theme";
-import { completeItem, fetchToday, markItemReady, remindLaterItem, snoozeItem } from "../store";
+import { completeItem, fetchToday, markItemReady, remindLaterItem, skipItem, snoozeItem } from "../store";
 import {
   armAlarmSession,
+  clearEndGaveUp,
   clearTaskCallOverride,
+  noteTaskCallUnanswered,
   setTaskCallUiVisible,
   silenceTaskAlert,
   snoozeTaskCall,
@@ -14,11 +16,11 @@ import {
   startTaskCallListening,
   stopAlarmSession as stopAlarmSessionNative,
   stopTaskCallListening,
+  subscribeTaskCallDismiss,
   subscribeTaskCallSpeech,
 } from "../taskAlerts";
-import { END_FOLLOWUP_MIN, START_SNOOZE_MIN } from "../taskCallConfig";
+import { snoozeDelayMs, UNANSWERED_RING_MS } from "../taskCallConfig";
 import { formatClock12 } from "../formatTime";
-import { resolveCallDelay } from "../taskCallPlanner";
 import {
   composeCompletePrompt,
   composeReadyPrompt,
@@ -48,10 +50,12 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   const [stage, setStage] = useState(truthyParam(params.pickedUp) ? "confirm" : "ringing");
   const [heard, setHeard] = useState("");
-  const [busy] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [voicePhase, setVoicePhase] = useState("idle");
   const finished = useRef(false);
   const dismissedRef = useRef(false);
+  const acting = useRef(false);
+  const handledLocally = useRef(false);
   const sessionRef = useRef(0);
   const promptRef = useRef("");
   const voicePhaseRef = useRef(voicePhase);
@@ -104,7 +108,17 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       if (dismissedRef.current || finished.current) return;
       if (next === "active") setTaskCallUiVisible(true).catch(() => {});
     });
-    return () => sub.remove();
+    return () => {
+      setTaskCallUiVisible(false).catch(() => {});
+      sub.remove();
+    };
+  }, [itemId, phase]);
+
+  const claimTap = useCallback(() => {
+    if (acting.current || dismissedRef.current) return false;
+    acting.current = true;
+    setBusy(true);
+    return true;
   }, []);
 
   useEffect(() => {
@@ -175,58 +189,99 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
 
   const enterConfirm = useCallback(() => {
     if (dismissedRef.current || finished.current) return;
-    silenceTaskAlert().catch(() => {});
     if (stageRef.current === "confirm") return;
+    if (!claimTap()) return;
+    silenceTaskAlert().catch(() => {});
     stageRef.current = "confirm";
     setStage("confirm");
-  }, []);
+    acting.current = false;
+    setBusy(false);
+  }, [claimTap]);
+
+  useEffect(() => {
+    if (stage !== "ringing" || isPreview) return undefined;
+    const timer = setTimeout(() => {
+      if (handledLocally.current || dismissedRef.current || stageRef.current !== "ringing") return;
+      noteTaskCallUnanswered({
+        itemId,
+        title,
+        phase,
+        durationMin,
+        domain,
+        alertLevel: params.alertLevel,
+      }).catch(() => {});
+    }, UNANSWERED_RING_MS);
+    return () => clearTimeout(timer);
+  }, [domain, durationMin, isPreview, itemId, params.alertLevel, phase, stage, title]);
+
+  useEffect(() => {
+    return subscribeTaskCallDismiss((event) => {
+      if (!event?.itemId || String(event.itemId) !== itemId) return;
+      if (handledLocally.current || dismissedRef.current) return;
+      handledLocally.current = true;
+      stopAlarmSession().catch(() => {});
+    });
+  }, [itemId, stopAlarmSession]);
 
   useEffect(() => {
     if (truthyParam(params.pickedUp)) enterConfirm();
   }, [enterConfirm, params.pickedUp]);
 
   const rejectCall = useCallback(async (overrideMinutes) => {
-    if (dismissedRef.current) return;
-    const requested = Number(overrideMinutes) > 0
-      ? Number(overrideMinutes)
-      : phase === "end"
-        ? END_FOLLOWUP_MIN
-        : START_SNOOZE_MIN;
-    const resolved = resolveCallDelay(todayItems, { itemId, minutes: requested });
-    const minutes = resolved.minutes;
+    if (!claimTap()) return;
+    handledLocally.current = true;
+    const minutes = Math.max(1, Math.round(snoozeDelayMs(phase, overrideMinutes) / 60000));
     const payload = item || { _id: itemId, title, domain, durationMin, alertLevel: params.alertLevel };
     try {
       await stopAlarmSession();
-      await snoozeTaskCall(payload, { phase, minutes, items: todayItems });
+      await snoozeTaskCall(payload, { phase, minutes });
       if (!isPreview && itemId) {
-        const action = phase === "end"
+        const started = Boolean(item?.startedAt);
+        const action = phase === "end" && started
           ? remindLaterItem({ itemId, minutes })
           : snoozeItem({ itemId, minutes });
         await dispatch(action).unwrap();
+        if (phase === "end") await clearEndGaveUp(itemId);
       }
     } catch (_e) {}
-  }, [dispatch, domain, durationMin, item, itemId, isPreview, params.alertLevel, phase, stopAlarmSession, title, todayItems]);
+  }, [claimTap, dispatch, domain, durationMin, item, itemId, isPreview, params.alertLevel, phase, stopAlarmSession, title]);
 
   const acceptReady = useCallback(async () => {
-    if (dismissedRef.current) return;
+    if (!claimTap()) return;
+    handledLocally.current = true;
     try {
       await stopAlarmSession();
       if (isPreview || !itemId) return;
       await dispatch(markItemReady(itemId)).unwrap();
       await clearTaskCallOverride(itemId);
+      await clearEndGaveUp(itemId);
     } catch (_e) {}
-  }, [dispatch, itemId, isPreview, stopAlarmSession]);
+  }, [claimTap, dispatch, itemId, isPreview, stopAlarmSession]);
 
   const acceptComplete = useCallback(async () => {
-    if (dismissedRef.current) return;
+    if (!claimTap()) return;
+    handledLocally.current = true;
     try {
       await stopAlarmSession();
       if (isPreview || !itemId) return;
       await dispatch(completeItem({ itemId, source: "task_call" })).unwrap();
       await clearTaskCallOverride(itemId);
+      await clearEndGaveUp(itemId);
       await dispatch(fetchToday());
     } catch (_e) {}
-  }, [dispatch, itemId, isPreview, stopAlarmSession]);
+  }, [claimTap, dispatch, itemId, isPreview, stopAlarmSession]);
+
+  const skipFromCall = useCallback(async () => {
+    if (!claimTap()) return;
+    handledLocally.current = true;
+    try {
+      await stopAlarmSession();
+      if (isPreview || !itemId) return;
+      await dispatch(skipItem({ itemId, reason: "skipped" })).unwrap();
+      await clearTaskCallOverride(itemId);
+      await clearEndGaveUp(itemId);
+    } catch (_e) {}
+  }, [claimTap, dispatch, itemId, isPreview, stopAlarmSession]);
 
   useEffect(() => {
     return subscribeTaskCallSpeech((event) => {
@@ -255,9 +310,10 @@ export default function TaskIncomingCallScreen({ navigation, route }) {
       else if (meaning === "snooze") rejectCall(deferMin || undefined);
       else if (meaning === "complete") acceptComplete();
       else if (meaning === "remind") rejectCall(deferMin || undefined);
+      else if (meaning === "skip") skipFromCall();
       else scheduleListen(400);
     });
-  }, [acceptComplete, acceptReady, phase, rejectCall, scheduleListen]);
+  }, [acceptComplete, acceptReady, phase, rejectCall, scheduleListen, skipFromCall]);
 
   const subtitle = phase === "end"
     ? "Time's up — did you finish?"
