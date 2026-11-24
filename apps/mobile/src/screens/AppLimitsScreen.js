@@ -65,7 +65,8 @@ export default function AppLimitsScreen({ navigation }) {
       <View style={styles.card}>
         <Text style={styles.hint}>
           Each limit is the total time that app can be open today, across every visit. At midnight the count starts
-          over. While the app is open, the time left sits at the top of the screen. YouTube opened in Chrome counts as Chrome.
+          over. From 11:00 PM to 7:00 AM a limited app stays closed even if time is left. While the app is open in
+          the day, the time left sits at the top of the screen. YouTube opened in Chrome counts as Chrome.
         </Text>
         {!available ? (
           <Text style={styles.note}>

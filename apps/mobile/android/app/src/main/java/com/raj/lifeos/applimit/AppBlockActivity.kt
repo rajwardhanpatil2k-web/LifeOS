@@ -74,6 +74,7 @@ class AppBlockActivity : Activity() {
     val label = source?.getStringExtra(EXTRA_LABEL)?.ifBlank { "This app" } ?: "This app"
     val limitMs = source?.getLongExtra(EXTRA_LIMIT_MS, 0L) ?: 0L
     val usedMs = source?.getLongExtra(EXTRA_USED_MS, limitMs) ?: limitMs
+    val night = source?.getBooleanExtra(EXTRA_NIGHT, false) == true
     val root = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
@@ -88,7 +89,11 @@ class AppBlockActivity : Activity() {
     root.addView(space(14))
     root.addView(
       labelView(
-        "You can use $label for ${formatSpent(limitMs)} each day. Today's time is used up (${formatSpent(usedMs)}). It starts again at midnight.",
+        if (night) {
+          "$label stays closed from 11:00 PM to 7:00 AM, even when today's time is still left. It opens again at 7:00 AM."
+        } else {
+          "You can use $label for ${formatSpent(limitMs)} each day. Today's time is used up (${formatSpent(usedMs)}). It starts again at midnight."
+        },
         16f,
         0xFF8D95A3.toInt(),
         false
@@ -156,6 +161,7 @@ class AppBlockActivity : Activity() {
     const val EXTRA_LABEL = "label"
     const val EXTRA_LIMIT_MS = "limitMs"
     const val EXTRA_USED_MS = "usedMs"
+    const val EXTRA_NIGHT = "night"
 
     @Volatile var resumedPackage: String? = null
     @Volatile var alive = false

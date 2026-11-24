@@ -5,7 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import java.util.Calendar
 import java.util.concurrent.Executors
+
+internal const val NIGHT_QUIET_START_HOUR = 23
+internal const val NIGHT_QUIET_END_HOUR = 7
 
 internal data class DecideInput(
   val limits: List<AppLimit>,
@@ -13,6 +17,7 @@ internal data class DecideInput(
   val foreground: String?,
   val selfPackage: String,
   val blockShowingFor: String?,
+  val nightQuiet: Boolean = false,
 )
 
 internal data class Decision(
@@ -20,9 +25,17 @@ internal data class Decision(
   val overlayRemainingMs: Long,
   val block: AppLimit?,
   val blockUsedMs: Long,
+  val blockNight: Boolean,
   val dismissBlock: Boolean,
   val statusText: String,
 )
+
+// 11:00 PM through 6:59 AM, on the phone's local clock. At 7:00 AM the daily
+// budget applies again.
+internal fun isNightQuiet(calendar: Calendar): Boolean {
+  val minutes = calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
+  return minutes >= NIGHT_QUIET_START_HOUR * 60 || minutes < NIGHT_QUIET_END_HOUR * 60
+}
 
 // One foreground app, one daily budget. The accessibility service (or the
 // fallback watcher) calls this about once a second and again on each app switch.
@@ -31,19 +44,24 @@ internal fun decide(input: DecideInput): Decision {
   val limit = input.limits.find { it.packageName == fg }
   val used = if (limit != null) input.usedMs[limit.packageName] ?: 0L else 0L
   val remaining = if (limit != null) limit.limitMs - used else 0L
+  val night = input.nightQuiet && limit != null && fg != input.selfPackage
   val over = limit != null && remaining <= 0L
-  val under = limit != null && remaining > 0L && fg != input.selfPackage
+  val under = limit != null && remaining > 0L && fg != input.selfPackage && !input.nightQuiet
 
   val showing = input.blockShowingFor
   val shown = input.limits.find { it.packageName == showing }
   val shownUsed = if (showing != null) input.usedMs[showing] ?: 0L else 0L
-  val dismiss = showing != null && (shown == null || shownUsed < shown.limitMs)
-  val launch = over && limit != null && showing != limit.packageName
+  val shownStillBlocked = shown != null && (input.nightQuiet || shownUsed >= shown.limitMs)
+  val dismiss = showing != null && !shownStillBlocked
+  val launch = (over || night) && limit != null && showing != limit.packageName
 
   val status = when {
+    night && limit != null -> "${limit.label} is off until 7:00 AM"
     launch && limit != null -> "${limit.label} is blocked for today"
+    showing != null && !dismiss && shown != null && input.nightQuiet -> "${shown.label} is off until 7:00 AM"
     showing != null && !dismiss && shown != null -> "${shown.label} is blocked for today"
     under && limit != null -> "${limit.label} · ${formatRemainingClock(remaining)} left"
+    input.nightQuiet -> "Limited apps are off until 7:00 AM"
     else -> "App limits are on"
   }
   return Decision(
@@ -51,6 +69,7 @@ internal fun decide(input: DecideInput): Decision {
     overlayRemainingMs = if (under && !launch) remaining else 0L,
     block = if (launch) limit else null,
     blockUsedMs = used,
+    blockNight = night,
     dismissBlock = dismiss && !launch,
     statusText = status,
   )
@@ -155,16 +174,29 @@ internal object AppLimitEnforcer {
 
   private fun buildDecision(context: Context): Decision {
     val limits = AppLimitStore.load(context)
+    val nightQuiet = isNightQuiet(Calendar.getInstance())
     if (limits.isEmpty()) {
-      return Decision(null, 0L, null, 0L, true, "App limits are on")
+      return Decision(null, 0L, null, 0L, false, true, "App limits are on")
     }
-    if (!AppLimitUsage.hasUsageAccess(context)) {
-      return Decision(null, 0L, null, 0L, false, "Allow usage access to count app time")
-    }
-    val snapshot = AppLimitUsage.snapshot(context, limits.map { it.packageName }.toSet())
     val now = System.currentTimeMillis()
     val hint = hintedPackage
     val hintFresh = !hint.isNullOrBlank() && now - hintedAt < 8_000L
+    if (!AppLimitUsage.hasUsageAccess(context)) {
+      if (!nightQuiet) {
+        return Decision(null, 0L, null, 0L, false, false, "Allow usage access to count app time")
+      }
+      return decide(
+        DecideInput(
+          limits = limits,
+          usedMs = emptyMap(),
+          foreground = if (hintFresh) hint else null,
+          selfPackage = context.packageName,
+          blockShowingFor = AppBlockActivity.resumedPackage,
+          nightQuiet = true,
+        )
+      )
+    }
+    val snapshot = AppLimitUsage.snapshot(context, limits.map { it.packageName }.toSet())
     // A fresh window event is the app they just opened. Usage events catch
     // up a moment later and then keep the countdown moving while they stay there.
     val foreground = if (hintFresh) hint else snapshot.foreground
@@ -175,6 +207,7 @@ internal object AppLimitEnforcer {
         foreground = foreground,
         selfPackage = context.packageName,
         blockShowingFor = AppBlockActivity.resumedPackage,
+        nightQuiet = nightQuiet,
       )
     )
   }
@@ -184,7 +217,7 @@ internal object AppLimitEnforcer {
     val suppressed = block != null &&
       block.packageName == AppBlockActivity.suppressPackage &&
       System.currentTimeMillis() < AppBlockActivity.suppressUntil
-    if (block != null && !suppressed) launchBlock(context, block, decision.blockUsedMs)
+    if (block != null && !suppressed) launchBlock(context, block, decision.blockUsedMs, decision.blockNight)
     else if (decision.dismissBlock) dismissBlock(context)
 
     val a11y = accessibility
@@ -201,7 +234,7 @@ internal object AppLimitEnforcer {
     }
   }
 
-  private fun launchBlock(context: Context, limit: AppLimit, usedMs: Long) {
+  private fun launchBlock(context: Context, limit: AppLimit, usedMs: Long, night: Boolean) {
     if (AppBlockActivity.resumedPackage == limit.packageName) return
     val now = System.currentTimeMillis()
     if (lastLaunchPkg == limit.packageName && now - lastLaunchAt < 1500L) return
@@ -218,6 +251,7 @@ internal object AppLimitEnforcer {
       putExtra(AppBlockActivity.EXTRA_LABEL, limit.label)
       putExtra(AppBlockActivity.EXTRA_LIMIT_MS, limit.limitMs)
       putExtra(AppBlockActivity.EXTRA_USED_MS, usedMs)
+      putExtra(AppBlockActivity.EXTRA_NIGHT, night)
     }
     try {
       context.startActivity(intent)

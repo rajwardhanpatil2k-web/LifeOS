@@ -247,7 +247,8 @@ export default function SettingsScreen({ navigation }) {
       <Pressable style={styles.card} onPress={() => navigation.navigate("AppLimits")}>
         <Text style={[styles.hint, { marginBottom: 8 }]}>
           Choose an app, such as Instagram or YouTube, and set how long it can stay open today. Life OS shows the
-          time left while you use it, and blocks the app when that time is gone. The count starts over at midnight.
+          time left while you use it, and blocks the app when that time is gone. From 11:00 PM to 7:00 AM those apps
+          stay closed even if time is left. The count starts over at midnight.
         </Text>
         <Text style={styles.link}>Set app limits →</Text>
       </Pressable>
